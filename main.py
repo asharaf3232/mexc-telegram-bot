@@ -89,9 +89,10 @@ def fetch_data(exchange, symbol, timeframe):
     """جلب بيانات الشموع التاريخية لعملة معينة."""
     try:
         ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=150)
+        if len(ohlcv) < BBANDS_PERIOD: # التحقق من وجود بيانات كافية مبكراً
+            return None
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-        # **الحل لمشكلة التحليل**: تعيين timestamp كفهرس
         df.set_index('timestamp', inplace=True)
         return df
     except Exception as e:
@@ -99,7 +100,7 @@ def fetch_data(exchange, symbol, timeframe):
         return None
 
 def analyze_market_data(df, symbol):
-    """تطبيق الاستراتيجية المتقدمة على البيانات."""
+    """(مُحصّنة) تطبيق الاستراتيجية المتقدمة مع التحقق من وجود المؤشرات."""
     if df is None or len(df) < BBANDS_PERIOD: return None
     try:
         # حساب المؤشرات
@@ -107,6 +108,18 @@ def analyze_market_data(df, symbol):
         df.ta.bbands(length=BBANDS_PERIOD, std=BBANDS_STDDEV, append=True)
         df.ta.macd(fast=MACD_FAST, slow=MACD_SLOW, signal=MACD_SIGNAL, append=True)
         df.ta.rsi(length=RSI_PERIOD, append=True)
+        
+        # *** التحصين الجديد: التأكد من أن الأعمدة المطلوبة موجودة ***
+        required_columns = [
+            f'BBU_{BBANDS_PERIOD}_{BBANDS_STDDEV}',
+            f'VWAP_{VWAP_PERIOD}',
+            f'MACD_{MACD_FAST}_{MACD_SLOW}_{MACD_SIGNAL}',
+            f'MACDs_{MACD_FAST}_{MACD_SLOW}_{MACD_SIGNAL}',
+            f'RSI_{RSI_PERIOD}'
+        ]
+        if not all(col in df.columns for col in required_columns):
+            logging.info(f"تجاهل {symbol} لعدم اكتمال حساب المؤشرات (بيانات غير كافية).")
+            return None
 
         last, prev = df.iloc[-2], df.iloc[-3]
 
@@ -125,8 +138,6 @@ def analyze_market_data(df, symbol):
                 "stop_loss": entry_price * (1 - STOP_LOSS_PERCENTAGE / 100),
                 "timestamp": df.index[-2], "reason": "تقاطع MACD واختراق Bollinger"
             }
-    except KeyError as ke:
-        logging.error(f"خطأ في تحليل {symbol}: لم يتم العثور على المؤشر {ke}. قد تكون البيانات غير كافية.")
     except Exception as e:
         logging.error(f"خطأ عام في تحليل {symbol}: {e}")
     return None
@@ -224,8 +235,8 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     df = pd.read_csv(PERFORMANCE_FILE)
     total_recs = len(df)
-    tp_hits = len(df[df['status'] == 'tp_hit']) # ملاحظة: يتطلب تحديثاً خارجياً
-    sl_hits = len(df[df['status'] == 'sl_hit']) # ملاحظة: يتطلب تحديثاً خارجياً
+    tp_hits = len(df[df['status'] == 'tp_hit'])
+    sl_hits = len(df[df['status'] == 'sl_hit'])
     active_trades = len(df[df['status'] == 'نشطة'])
     win_rate = (tp_hits / (tp_hits + sl_hits) * 100) if (tp_hits + sl_hits) > 0 else 0
     
