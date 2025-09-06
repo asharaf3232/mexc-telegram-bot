@@ -305,12 +305,16 @@ async def main_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == "🔧 تعديل المعايير": await show_set_parameter_instructions(update, context)
     elif text == "🔙 القائمة الرئيسية": await start_command(update, context)
     elif text == "🚀 الزخم والاندفاع":
-        bot_data["settings"]["active_strategy"] = "momentum_breakout"
+        strategy_name = "momentum_breakout"
+        bot_data["settings"]["active_strategy"] = strategy_name
+        logging.info(f"Active strategy changed to {strategy_name}") # <-- سطر التسجيل المضاف
         save_settings()
         await update.message.reply_text("✅ تم تفعيل استراتيجية `الزخم والاندفاع`.")
         await show_settings_menu(update, context)
     elif text == "🔄 الارتداد من الدعم":
-        bot_data["settings"]["active_strategy"] = "mean_reversion"
+        strategy_name = "mean_reversion"
+        bot_data["settings"]["active_strategy"] = strategy_name
+        logging.info(f"Active strategy changed to {strategy_name}") # <-- سطر التسجيل المضاف
         save_settings()
         await update.message.reply_text("✅ تم تفعيل استراتيجية `الارتداد من الدعم`.")
         await show_settings_menu(update, context)
@@ -337,11 +341,11 @@ async def main_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def post_init(application: Application):
     """دالة تعمل بعد تهيئة البوت وقبل بدء التشغيل."""
-    await asyncio.sleep(5) # فترة إحماء للشبكة
+    await asyncio.sleep(5)
     await initialize_exchanges()
     if not bot_data["exchanges"]:
         logging.critical("CRITICAL: Failed to connect to any exchange. Bot cannot run.")
-        await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="❌ فشل البوت في الاتصال بأي منصة. يرجى التحقق من السجل.")
+        await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="❌ فشل البوت في الاتصال بأي منصة.")
         application.stop()
         return
 
