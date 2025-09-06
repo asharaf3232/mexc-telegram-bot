@@ -32,6 +32,7 @@ LOOP_INTERVAL_SECONDS = 900  # 15 دقيقة
 EXCLUDED_SYMBOLS = ['BTC/USDT', 'ETH/USDT']
 STABLECOINS = ['USDC', 'DAI', 'BUSD', 'TUSD', 'USDP']
 PERFORMANCE_FILE = 'recommendations_log.csv'
+TOP_N_SYMBOLS_BY_VOLUME = 100 # (جديد) عدد العملات التي سيتم فحصها
 
 # 4. معايير الاستراتيجية المتقدمة
 VWAP_PERIOD = 14
@@ -51,7 +52,6 @@ STOP_LOSS_PERCENTAGE = 2.0
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 bot_data = {
     "exchange": None,
-    "symbols_to_watch": [],
     "last_signal_time": {}
 }
 
@@ -72,25 +72,35 @@ def get_exchange_client():
         logging.error(f"فشل الاتصال بمنصة MEXC: {e}")
         return None
 
-async def fetch_dynamic_symbols(exchange):
-    """جلب كل أزواج USDT من المنصة واستثناء العملات المحددة والمستقرة."""
-    logging.info("جاري جلب قائمة العملات الديناميكية من MEXC...")
+async def get_top_movers(exchange):
+    """(جديد) جلب أفضل العملات من حيث حجم التداول."""
+    logging.info(f"جاري جلب أفضل {TOP_N_SYMBOLS_BY_VOLUME} عملة من حيث حجم التداول...")
     try:
-        all_symbols = [s for s in exchange.symbols if s.endswith('/USDT')]
-        filtered_symbols = [s for s in all_symbols if not any(stable in s for stable in STABLECOINS)]
+        tickers = exchange.fetch_tickers()
+        usdt_tickers = {symbol: ticker for symbol, ticker in tickers.items() if symbol.endswith('/USDT')}
+        
+        # فرز العملات حسب حجم التداول (quoteVolume)
+        sorted_tickers = sorted(usdt_tickers.values(), key=lambda t: t.get('quoteVolume', 0), reverse=True)
+        
+        top_symbols = [t['symbol'] for t in sorted_tickers]
+        
+        # فلترة العملات المستبعدة والمستقرة
+        filtered_symbols = [s for s in top_symbols if not any(stable in s for stable in STABLECOINS)]
         final_symbols = [s for s in filtered_symbols if s not in EXCLUDED_SYMBOLS]
-        logging.info(f"تم العثور على {len(final_symbols)} عملة للمراقبة.")
-        return final_symbols
+        
+        # أخذ أفضل N عملة
+        final_list = final_symbols[:TOP_N_SYMBOLS_BY_VOLUME]
+        logging.info(f"تم تحديد {len(final_list)} عملة نشطة للفحص.")
+        return final_list
     except Exception as e:
-        logging.error(f"خطأ في جلب العملات: {e}")
+        logging.error(f"خطأ في جلب العملات النشطة: {e}")
         return []
 
 def fetch_data(exchange, symbol, timeframe):
     """جلب بيانات الشموع التاريخية لعملة معينة."""
     try:
         ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=150)
-        if len(ohlcv) < BBANDS_PERIOD: # التحقق من وجود بيانات كافية مبكراً
-            return None
+        if len(ohlcv) < BBANDS_PERIOD: return None
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         df.set_index('timestamp', inplace=True)
@@ -100,32 +110,21 @@ def fetch_data(exchange, symbol, timeframe):
         return None
 
 def analyze_market_data(df, symbol):
-    """(مُحصّنة) تطبيق الاستراتيجية المتقدمة مع التحقق من وجود المؤشرات."""
+    """(محصّنة) تطبيق الاستراتيجية المتقدمة."""
     if df is None or len(df) < BBANDS_PERIOD: return None
     try:
-        # حساب المؤشرات
         df.ta.vwap(length=VWAP_PERIOD, append=True)
         df.ta.bbands(length=BBANDS_PERIOD, std=BBANDS_STDDEV, append=True)
         df.ta.macd(fast=MACD_FAST, slow=MACD_SLOW, signal=MACD_SIGNAL, append=True)
         df.ta.rsi(length=RSI_PERIOD, append=True)
         
-        # *** التحصين الجديد: التأكد من أن الأعمدة المطلوبة موجودة ***
-        required_columns = [
-            f'BBU_{BBANDS_PERIOD}_{BBANDS_STDDEV}',
-            f'VWAP_{VWAP_PERIOD}',
-            f'MACD_{MACD_FAST}_{MACD_SLOW}_{MACD_SIGNAL}',
-            f'MACDs_{MACD_FAST}_{MACD_SLOW}_{MACD_SIGNAL}',
-            f'RSI_{RSI_PERIOD}'
-        ]
+        required_columns = [f'BBU_{BBANDS_PERIOD}_{BBANDS_STDDEV}', f'VWAP_{VWAP_PERIOD}', f'MACD_{MACD_FAST}_{MACD_SLOW}_{MACD_SIGNAL}', f'MACDs_{MACD_FAST}_{MACD_SLOW}_{MACD_SIGNAL}', f'RSI_{RSI_PERIOD}']
         if not all(col in df.columns for col in required_columns):
-            logging.info(f"تجاهل {symbol} لعدم اكتمال حساب المؤشرات (بيانات غير كافية).")
             return None
 
         last, prev = df.iloc[-2], df.iloc[-3]
 
-        # --- شروط الاستراتيجية ---
-        macd_crossover = prev[f'MACD_{MACD_FAST}_{MACD_SLOW}_{MACD_SIGNAL}'] <= prev[f'MACDs_{MACD_FAST}_{MACD_SLOW}_{MACD_SIGNAL}'] and \
-                         last[f'MACD_{MACD_FAST}_{MACD_SLOW}_{MACD_SIGNAL}'] > last[f'MACDs_{MACD_FAST}_{MACD_SLOW}_{MACD_SIGNAL}']
+        macd_crossover = prev[f'MACD_{MACD_FAST}_{MACD_SLOW}_{MACD_SIGNAL}'] <= prev[f'MACDs_{MACD_FAST}_{MACD_SLOW}_{MACD_SIGNAL}'] and last[f'MACD_{MACD_FAST}_{MACD_SLOW}_{MACD_SIGNAL}'] > last[f'MACDs_{MACD_FAST}_{MACD_SLOW}_{MACD_SIGNAL}']
         bollinger_breakout = last['close'] > last[f'BBU_{BBANDS_PERIOD}_{BBANDS_STDDEV}']
         vwap_confirmation = last['close'] > last[f'VWAP_{VWAP_PERIOD}']
         rsi_condition = last[f'RSI_{RSI_PERIOD}'] < RSI_MAX_LEVEL
@@ -143,19 +142,14 @@ def analyze_market_data(df, symbol):
     return None
 
 async def send_telegram_message(bot: Bot, signal):
-    """تنسيق وإرسال إشارة التداول إلى تليجرام."""
     message = f"""
 ✅ *توصية تداول جديدة* ✅
-
 *العملة:* `{signal['symbol']}`
 *الاستراتيجية:* `{signal['reason']}`
 *الإجراء:* `شراء (BUY)`
-
 *سعر الدخول:* `${signal['entry_price']:,.4f}`
-
 🎯 *جني الأرباح ({TAKE_PROFIT_PERCENTAGE}%):* `${signal['take_profit']:,.4f}`
 🛑 *وقف الخسارة ({STOP_LOSS_PERCENTAGE}%):* `${signal['stop_loss']:,.4f}`
-
 *إخلاء مسؤولية: التداول عالي المخاطر.*
 """
     try:
@@ -168,19 +162,24 @@ async def send_telegram_message(bot: Bot, signal):
 def log_recommendation(signal):
     """حفظ التوصية في ملف CSV لتتبع الأداء."""
     file_exists = os.path.isfile(PERFORMANCE_FILE)
-    df = pd.DataFrame([{'timestamp': signal['timestamp'], 'symbol': signal['symbol'], 'entry_price': signal['entry_price'],
-                        'take_profit': signal['take_profit'], 'stop_loss': signal['stop_loss'],
-                        'status': 'نشطة', 'exit_price': None, 'closed_at': None}])
+    df = pd.DataFrame([{'timestamp': signal['timestamp'], 'symbol': signal['symbol'], 'entry_price': signal['entry_price'], 'take_profit': signal['take_profit'], 'stop_loss': signal['stop_loss'], 'status': 'نشطة', 'exit_price': None, 'closed_at': None}])
     with open(PERFORMANCE_FILE, 'a') as f:
         df.to_csv(f, header=not file_exists, index=False, encoding='utf-8-sig')
-    logging.info(f"تم تسجيل التوصية لعملة {signal['symbol']}")
 
 async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
-    """تنفيذ جولة فحص واحدة للسوق."""
-    exchange, symbols, last_signal_time = bot_data['exchange'], bot_data['symbols_to_watch'], bot_data['last_signal_time']
+    """تنفيذ جولة فحص واحدة للسوق على العملات النشطة فقط."""
+    exchange = bot_data['exchange']
+    last_signal_time = bot_data['last_signal_time']
+    
+    # (تعديل) جلب العملات النشطة في كل مرة
+    symbols_to_scan = await get_top_movers(exchange)
+    if not symbols_to_scan:
+        logging.warning("لم يتم العثور على عملات نشطة للفحص. سيتم التخطي.")
+        return
+
     found_signals = 0
-    logging.info(f"بدء جولة فحص جديدة لـ {len(symbols)} عملة...")
-    for symbol in symbols:
+    logging.info(f"بدء جولة فحص جديدة لـ {len(symbols_to_scan)} عملة نشطة...")
+    for symbol in symbols_to_scan:
         df = fetch_data(exchange, symbol, TIMEFRAME)
         if df is not None:
             signal = analyze_market_data(df, symbol)
@@ -190,78 +189,55 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
                     await send_telegram_message(context.bot, signal)
                     last_signal_time[symbol] = current_time
                     found_signals += 1
-                else:
-                    logging.info(f"تم تجاهل إشارة مكررة لعملة {symbol}.")
+        # (جديد) إضافة استراحة قصيرة لتخفيف الضغط
+        await asyncio.sleep(0.5) 
+        
     logging.info(f"اكتمل الفحص. تم العثور على {found_signals} إشارة جديدة.")
 
 ## --- أوامر ومعالجات تليجرام (مُعرّبة) --- ##
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """التعامل مع أمر /start وعرض القائمة الرئيسية."""
-    keyboard = [
-        ["📊 الإحصائيات", "ℹ️ مساعدة"],
-        ["🔍 فحص يدوي"]
-    ]
+    keyboard = [["📊 الإحصائيات", "ℹ️ مساعدة"], ["🔍 فحص يدوي"]]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-    await update.message.reply_text(
-        "أهلاً بك في بوت التداول المتقدم! أنا الآن أراقب السوق. استخدم الأزرار في الأسفل للتفاعل.",
-        reply_markup=reply_markup
-    )
+    await update.message.reply_text("أهلاً بك! أنا بوت التداول الذكي. أراقب الآن العملات النشطة في السوق. استخدم الأزرار للتفاعل.", reply_markup=reply_markup)
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """عرض رسالة المساعدة."""
     help_text = """
-*مساعدة بوت التداول المتقدم*
-
-`🔍 فحص يدوي` - يقوم بتشغيل فحص فوري للسوق.
-`📊 الإحصائيات` - يعرض إحصائيات أداء التوصيات السابقة.
-`ℹ️ مساعدة` - يعرض رسالة المساعدة هذه.
-
-يقوم البوت تلقائياً بمسح جميع أزواج USDT على منصة MEXC (باستثناء BTC و ETH) كل 15 دقيقة.
+*مساعدة بوت التداول الذكي*
+`🔍 فحص يدوي` - يفحص أفضل 100 عملة من حيث السيولة فوراً.
+`📊 الإحصائيات` - يعرض أداء التوصيات السابقة.
+`ℹ️ مساعدة` - يعرض هذه الرسالة.
+يقوم البوت تلقائياً بفحص العملات النشطة كل 15 دقيقة.
 """
     await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
 
 async def manual_scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """التعامل مع طلب الفحص اليدوي."""
-    await update.message.reply_text("👍 حسناً! جاري بدء فحص يدوي للسوق الآن...")
+    await update.message.reply_text("👍 حسناً! جاري فحص العملات النشطة الآن...")
     await perform_scan(context)
     await update.message.reply_text("✅ اكتمل الفحص اليدوي.")
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """عرض إحصائيات الأداء."""
     if not os.path.exists(PERFORMANCE_FILE):
-        await update.message.reply_text("لم يتم تسجيل أي توصيات بعد. الإحصائيات غير متاحة.")
+        await update.message.reply_text("لم يتم تسجيل أي توصيات بعد.")
         return
-
     df = pd.read_csv(PERFORMANCE_FILE)
-    total_recs = len(df)
-    tp_hits = len(df[df['status'] == 'tp_hit'])
-    sl_hits = len(df[df['status'] == 'sl_hit'])
-    active_trades = len(df[df['status'] == 'نشطة'])
-    win_rate = (tp_hits / (tp_hits + sl_hits) * 100) if (tp_hits + sl_hits) > 0 else 0
-    
+    total_recs, active_trades = len(df), len(df[df['status'] == 'نشطة'])
     stats_message = f"""
 *إحصائيات الأداء*
-
 - *إجمالي التوصيات المرسلة:* {total_recs}
-- *الصفقات النشطة:* {active_trades}
-- *صفقات حققت الهدف:* {tp_hits}
-- *صفقات ضربت وقف الخسارة:* {sl_hits}
-- *معدل النجاح (للصفقات المغلقة):* `{win_rate:.2f}%`
-
-*ملاحظة: هذا نظام تتبع أداء مبسط.*
+- *الصفقات النشطة حالياً:* {active_trades}
+*ملاحظة: نظام تتبع مبسط.*
 """
     await update.message.reply_text(stats_message, parse_mode=ParseMode.MARKDOWN)
 
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """التعامل مع ضغطات الأزرار من لوحة المفاتيح المخصصة."""
+    """التعامل مع ضغطات الأزرار."""
     text = update.message.text
-    if text == "📊 الإحصائيات":
-        await stats_command(update, context)
-    elif text == "ℹ️ مساعدة":
-        await help_command(update, context)
-    elif text == "🔍 فحص يدوي":
-        await manual_scan_command(update, context)
+    if text == "📊 الإحصائيات": await stats_command(update, context)
+    elif text == "ℹ️ مساعدة": await help_command(update, context)
+    elif text == "🔍 فحص يدوي": await manual_scan_command(update, context)
 
 async def post_init(application: Application):
     """دالة تعمل بعد تهيئة البوت مباشرة."""
@@ -269,10 +245,9 @@ async def post_init(application: Application):
     if not bot_data['exchange']:
         logging.error("لم يتم الاتصال بالمنصة. لن يتمكن البوت من الفحص.")
         return
-    bot_data['symbols_to_watch'] = await fetch_dynamic_symbols(bot_data['exchange'])
     await application.bot.send_message(
         chat_id=TELEGRAM_CHAT_ID,
-        text=f"🚀 *البوت الآن متصل وجاهز للعمل!*\n- *الاستراتيجية:* `متقدمة (MACD, BB, VWAP)`\n- *عدد العملات المراقبة:* `{len(bot_data['symbols_to_watch'])}`",
+        text=f"🚀 *البوت الآن متصل وجاهز للعمل!*\n- *الاستراتيجية:* `القنص الذكي (فحص أفضل {TOP_N_SYMBOLS_BY_VOLUME})`",
         parse_mode=ParseMode.MARKDOWN
     )
     application.job_queue.run_repeating(perform_scan, interval=LOOP_INTERVAL_SECONDS, first=10)
@@ -282,11 +257,8 @@ async def post_init(application: Application):
 if __name__ == '__main__':
     print("🚀 جاري بدء تشغيل البوت...")
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
-
-    # إضافة المعالجات
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
-    
     print("✅ البوت يعمل الآن ويستمع للتحديثات...")
     application.run_polling()
 
