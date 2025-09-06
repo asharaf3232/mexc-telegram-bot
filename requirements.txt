@@ -1,3 +1,4 @@
-ccxtpandaspandas
-tapython
-telegram-bot
+ccxt
+pandas
+pandas-ta
+python-telegram-bot
