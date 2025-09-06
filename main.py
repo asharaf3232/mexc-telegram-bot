@@ -335,32 +335,14 @@ async def main_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await update.message.reply_text(f"❌ خطأ: المعيار `{param}` غير موجود.")
 
-## --- التشغيل الرئيسي المنظم --- ##
-async def main():
-    """الدالة الرئيسية التي تنظم عملية بدء التشغيل بالكامل."""
-    logging.info("Bot starting up... Giving network 5 seconds to initialize.")
-    await asyncio.sleep(5)
-    load_settings()
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-    application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, main_text_handler))
-    
-    # استخدام post_init لضمان تشغيل التهيئة بعد بناء التطبيق
-    application.post_init = post_init
-    
-    # استخدام post_shutdown لضمان الإغلاق النظيف
-    application.post_shutdown = post_shutdown
-    
-    await application.run_polling()
-
 async def post_init(application: Application):
     """دالة تعمل بعد تهيئة البوت وقبل بدء التشغيل."""
+    await asyncio.sleep(5) # فترة إحماء للشبكة
     await initialize_exchanges()
     if not bot_data["exchanges"]:
-        logging.critical("CRITICAL: Failed to connect to any exchange after all retries. Bot cannot run.")
+        logging.critical("CRITICAL: Failed to connect to any exchange. Bot cannot run.")
         await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="❌ فشل البوت في الاتصال بأي منصة. يرجى التحقق من السجل.")
-        # This will stop the bot gracefully if it cannot connect
-        await application.stop()
+        application.stop()
         return
 
     application.job_queue.run_repeating(perform_scan, interval=SCAN_INTERVAL_SECONDS, first=10)
@@ -380,13 +362,23 @@ async def post_shutdown(application: Application):
         await exchange.close()
     logging.info("Connections closed successfully.")
 
-if __name__ == '__main__':
+def main():
+    """الدالة الرئيسية المنظمة للتشغيل."""
     print("🚀 Starting Professional Trading Bot...")
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("Bot stopped manually.")
-    except Exception as e:
-        logging.critical(f"Bot stopped due to a critical error: {e}")
+    load_settings()
+    
+    application = (Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).post_shutdown(post_shutdown).build())
+    
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, main_text_handler))
+    
+    print("✅ Bot is now running and polling for updates...")
+    application.run_polling()
 
+
+if __name__ == '__main__':
+    try:
+        main()
+    except Exception as e:
+        logging.critical(f"Bot stopped due to a critical error in __main__: {e}")
 
