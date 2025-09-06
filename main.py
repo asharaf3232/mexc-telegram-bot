@@ -15,13 +15,12 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 
 # 1. مفاتيح منصة MEXC
 MEXC_API_KEY = os.getenv('MEXC_API_KEY')
-MEXC_SECRET_KEY = os.getenv('MEXC_API_SECRET') # <-- تم تعديلها في الدرس السابق
+MEXC_SECRET_KEY = os.getenv('MEXC_API_SECRET') 
 
 # 2. إعدادات بوت التليجرام
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 
-# التأكد من وجود كل المتغيرات الضرورية
 if not all([MEXC_API_KEY, MEXC_SECRET_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID]):
     print("❌ خطأ فادح: واحد أو أكثر من متغيرات البيئة غير موجود.")
     exit()
@@ -29,7 +28,7 @@ if not all([MEXC_API_KEY, MEXC_SECRET_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID]
 # 3. إعدادات استراتيجية التحليل
 SYMBOLS_TO_WATCH = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'DOGE/USDT']
 TIMEFRAME = '15m'
-LOOP_INTERVAL_SECONDS = 300  # الفاصل الزمني للفحص التلقائي
+LOOP_INTERVAL_SECONDS = 300
 
 # 4. معايير الاستراتيجية الكمية
 VOLUME_SPIKE_FACTOR = 3.0
@@ -49,7 +48,6 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 ## --- FUNCTIONS --- ##
 
 def get_exchange_client():
-    """يقوم بإعداد وتجهيز الاتصال بمنصة MEXC."""
     try:
         exchange = ccxt.mexc({
             'apiKey': MEXC_API_KEY,
@@ -63,7 +61,6 @@ def get_exchange_client():
         return None
 
 def fetch_data(exchange, symbol, timeframe):
-    """يجلب بيانات الشموع التاريخية لعملة معينة."""
     try:
         ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=100)
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
@@ -74,7 +71,6 @@ def fetch_data(exchange, symbol, timeframe):
         return None
 
 def analyze_market_data(df, symbol):
-    """يطبق الاستراتيجية على البيانات ويقرر ما إذا كانت هناك فرصة للشراء."""
     if df is None or len(df) < EMA_SLOW_PERIOD:
         return None
     try:
@@ -104,7 +100,6 @@ def analyze_market_data(df, symbol):
     return None
 
 async def send_telegram_message(bot: Bot, signal):
-    """يقوم بتنسيق رسالة التوصية وإرسالها إلى تليجرام."""
     message = f"""
 🔔 *توصية جديدة* 🔔
 
@@ -125,12 +120,9 @@ async def send_telegram_message(bot: Bot, signal):
         logging.error(f"❌ فشل إرسال الرسالة إلى تليجرام: {e}")
 
 async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
-    """الدالة الأساسية التي تقوم بجولة فحص واحدة للسوق."""
     exchange = context.bot_data['exchange']
     found_signals = 0
-    
     logging.info("▶️  بدء جولة فحص للسوق...")
-    
     for symbol in SYMBOLS_TO_WATCH:
         df = fetch_data(exchange, symbol, TIMEFRAME)
         if df is not None:
@@ -143,29 +135,25 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
                     found_signals += 1
                 else:
                     logging.info(f"ℹ️ تم تجاهل إشارة مكررة لعملة {symbol}.")
-    
     logging.info("⏹️  انتهاء جولة الفحص.")
     return found_signals
 
-# --- NEW: Command Handlers & Jobs ---
+# --- Command Handlers, Jobs & Post Init ---
 
 async def start_command(update, context):
-    """إرسال رسالة ترحيبية عند بدء المحادثة مع البوت."""
     await update.message.reply_text("أهلاً بك! أنا بوت تحليل السوق. أعمل تلقائياً في الخلفية. يمكنك استخدام الأمر /scan لطلب فحص يدوي فوري.")
 
 async def manual_scan_command(update, context):
-    """المشغل الخاص بالفحص اليدوي عند طلب المستخدم."""
     await update.message.reply_text("👍 حسناً، جاري الفحص اليدوي للسوق الآن...")
     found_signals_count = await perform_scan(context)
     if found_signals_count == 0:
         await update.message.reply_text("✅ اكتمل الفحص اليدوي. لم يتم العثور على فرص مطابقة للاستراتيجية حالياً.")
 
 async def timed_scan_job(context: ContextTypes.DEFAULT_TYPE):
-    """الوظيفة المجدولة التي تعمل بشكل متكرر."""
     await perform_scan(context)
 
-async def send_startup_message(bot: Bot):
-    """(جديد) إرسال رسالة عند بدء تشغيل البوت."""
+async def post_init(application: Application):
+    """(جديد) إرسال رسالة عند بدء التشغيل - الطريقة الصحيحة."""
     symbols_list_str = ", ".join(SYMBOLS_TO_WATCH)
     message = f"""
 🚀 *تم تشغيل البوت بنجاح* 🚀
@@ -177,7 +165,7 @@ async def send_startup_message(bot: Bot):
 سأقوم بإعلامك فور العثور على فرصة مناسبة.
 """
     try:
-        await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
+        await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
         logging.info("✅ تم إرسال رسالة بدء التشغيل.")
     except Exception as e:
         logging.error(f"❌ فشل في إرسال رسالة بدء التشغيل: {e}")
@@ -187,29 +175,24 @@ async def send_startup_message(bot: Bot):
 if __name__ == '__main__':
     print("🚀 جارٍ بدء تشغيل البوت...")
     
-    # تهيئة الاتصال بالمنصة
     exchange_client = get_exchange_client()
     if not exchange_client:
         print("⏹️ لا يمكن بدء تشغيل البوت بدون اتصال ناجح بالمنصة.")
         exit()
 
-    # إعداد تطبيق البوت
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    # إعداد تطبيق البوت مع دمج دالة post_init
+    application = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
     
-    # تخزين كائن الاتصال بالمنصة للوصول إليه من أي مكان
     application.bot_data['exchange'] = exchange_client
 
-    # إضافة الأوامر
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("scan", manual_scan_command))
 
     # جدولة الفحص التلقائي المتكرر
     job_queue = application.job_queue
-    job_queue.run_repeating(timed_scan_job, interval=LOOP_INTERVAL_SECONDS, first=10) # يبدأ أول فحص بعد 10 ثوان
+    job_queue.run_repeating(timed_scan_job, interval=LOOP_INTERVAL_SECONDS, first=10)
 
-    # إرسال رسالة بدء التشغيل (مرة واحدة)
-    # نستخدم asyncio.run لتشغيل هذه الدالة غير المتزامنة بشكل منفصل
-    asyncio.run(send_startup_message(application.bot))
+    # <<-- تم حذف سطر asyncio.run من هنا -->>
 
     # تشغيل البوت
     print("✅ البوت يعمل الآن ويستمع للأوامر...")
