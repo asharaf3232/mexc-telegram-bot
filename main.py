@@ -7,193 +7,266 @@ import asyncio
 import time
 import os
 import logging
-from telegram import Bot
+from datetime import datetime
+from telegram import Bot, Update, ReplyKeyboardMarkup
 from telegram.constants import ParseMode
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
 ## --- CONFIGURATION --- ##
 
-# 1. مفاتيح منصة MEXC
+# 1. API Keys from Environment Variables
 MEXC_API_KEY = os.getenv('MEXC_API_KEY')
-MEXC_SECRET_KEY = os.getenv('MEXC_API_SECRET') 
+MEXC_SECRET_KEY = os.getenv('MEXC_API_SECRET')
 
-# 2. إعدادات بوت التليجرام
+# 2. Telegram Bot Configuration
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 
 if not all([MEXC_API_KEY, MEXC_SECRET_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID]):
-    print("❌ خطأ فادح: واحد أو أكثر من متغيرات البيئة غير موجود.")
+    print("FATAL ERROR: Missing one or more environment variables.")
     exit()
 
-# 3. إعدادات استراتيجية التحليل
-SYMBOLS_TO_WATCH = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'DOGE/USDT']
+# 3. Trading Strategy & Market Scan Configuration
 TIMEFRAME = '15m'
-LOOP_INTERVAL_SECONDS = 300
+LOOP_INTERVAL_SECONDS = 900  # 15 minutes
+EXCLUDED_SYMBOLS = ['BTC/USDT', 'ETH/USDT']
+STABLECOINS = ['USDC', 'DAI', 'BUSD', 'TUSD', 'USDP']
+PERFORMANCE_FILE = 'recommendations_log.csv'
 
-# 4. معايير الاستراتيجية الكمية
-VOLUME_SPIKE_FACTOR = 3.0
-EMA_FAST_PERIOD = 10
-EMA_SLOW_PERIOD = 25
+# 4. Advanced Strategy Parameters
+VWAP_PERIOD = 14
+MACD_FAST = 12
+MACD_SLOW = 26
+MACD_SIGNAL = 9
+BBANDS_PERIOD = 20
+BBANDS_STDDEV = 2.0
 RSI_PERIOD = 14
-RSI_MAX_LEVEL = 65
+RSI_MAX_LEVEL = 68
 
-# 5. إعدادات إدارة المخاطر
-TAKE_PROFIT_PERCENTAGE = 3.0
-STOP_LOSS_PERCENTAGE = 1.5
+# 5. Risk Management
+TAKE_PROFIT_PERCENTAGE = 4.0
+STOP_LOSS_PERCENTAGE = 2.0
 
-# --- إعدادات إضافية ---
-last_signal_time = {}
+# --- Setup ---
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+bot_data = {
+    "exchange": None,
+    "symbols_to_watch": [],
+    "last_signal_time": {}
+}
 
-## --- FUNCTIONS --- ##
+## --- CORE FUNCTIONS (Unchanged) --- ##
 
 def get_exchange_client():
+    """Initializes the MEXC exchange client."""
     try:
         exchange = ccxt.mexc({
             'apiKey': MEXC_API_KEY,
             'secret': MEXC_SECRET_KEY,
             'options': {'defaultType': 'spot'},
         })
-        logging.info("✅ تم الاتصال بنجاح بمنصة MEXC.")
+        exchange.load_markets()
+        logging.info("Successfully connected to MEXC exchange.")
         return exchange
     except Exception as e:
-        logging.error(f"❌ فشل الاتصال بمنصة MEXC: {e}")
+        logging.error(f"Failed to connect to MEXC: {e}")
         return None
 
-def fetch_data(exchange, symbol, timeframe):
+async def fetch_dynamic_symbols(exchange):
+    """Fetches all USDT pairs from the exchange, excluding specified symbols and stablecoins."""
+    logging.info("Fetching dynamic symbols from MEXC...")
     try:
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=100)
+        all_symbols = [s for s in exchange.symbols if s.endswith('/USDT')]
+        filtered_symbols = [s for s in all_symbols if not any(stable in s for stable in STABLECOINS)]
+        final_symbols = [s for s in filtered_symbols if s not in EXCLUDED_SYMBOLS]
+        logging.info(f"Found {len(final_symbols)} symbols to monitor.")
+        return final_symbols
+    except Exception as e:
+        logging.error(f"Error fetching dynamic symbols: {e}")
+        return []
+
+def fetch_data(exchange, symbol, timeframe):
+    """Fetches historical OHLCV data for a given symbol."""
+    try:
+        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=150)
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         return df
     except Exception as e:
-        logging.warning(f"⚠️ حدث خطأ أثناء جلب البيانات لعملة {symbol}: {e}")
+        logging.warning(f"Could not fetch data for {symbol}: {e}")
         return None
 
 def analyze_market_data(df, symbol):
-    if df is None or len(df) < EMA_SLOW_PERIOD:
-        return None
+    """Applies the advanced trading strategy."""
+    if df is None or len(df) < BBANDS_PERIOD: return None
     try:
-        df.ta.ema(length=EMA_FAST_PERIOD, append=True)
-        df.ta.ema(length=EMA_SLOW_PERIOD, append=True)
+        df.ta.vwap(length=VWAP_PERIOD, append=True)
+        df.ta.bbands(length=BBANDS_PERIOD, std=BBANDS_STDDEV, append=True)
+        df.ta.macd(fast=MACD_FAST, slow=MACD_SLOW, signal=MACD_SIGNAL, append=True)
         df.ta.rsi(length=RSI_PERIOD, append=True)
-        df['volume_sma'] = df['volume'].rolling(window=EMA_SLOW_PERIOD).mean()
-        last_row = df.iloc[-2]
-        previous_row = df.iloc[-3]
-        volume_condition = last_row['volume'] > last_row['volume_sma'] * VOLUME_SPIKE_FACTOR
-        crossover_condition = previous_row[f'EMA_{EMA_FAST_PERIOD}'] <= previous_row[f'EMA_{EMA_SLOW_PERIOD}'] and last_row[f'EMA_{EMA_FAST_PERIOD}'] > last_row[f'EMA_{EMA_SLOW_PERIOD}']
-        rsi_condition = last_row[f'RSI_{RSI_PERIOD}'] < RSI_MAX_LEVEL
-        price_condition = last_row['close'] > last_row[f'EMA_{EMA_FAST_PERIOD}']
-        if volume_condition and crossover_condition and rsi_condition and price_condition:
-            entry_price = last_row['close']
-            signal = {
-                "symbol": symbol,
-                "entry_price": entry_price,
+        last, prev = df.iloc[-2], df.iloc[-3]
+
+        macd_crossover = prev[f'MACD_{MACD_FAST}_{MACD_SLOW}_{MACD_SIGNAL}'] <= prev[f'MACDs_{MACD_FAST}_{MACD_SLOW}_{MACD_SIGNAL}'] and \
+                         last[f'MACD_{MACD_FAST}_{MACD_SLOW}_{MACD_SIGNAL}'] > last[f'MACDs_{MACD_FAST}_{MACD_SLOW}_{MACD_SIGNAL}']
+        bollinger_breakout = last['close'] > last[f'BBU_{BBANDS_PERIOD}_{BBANDS_STDDEV}']
+        vwap_confirmation = last['close'] > last[f'VWAP_{VWAP_PERIOD}']
+        rsi_condition = last[f'RSI_{RSI_PERIOD}'] < RSI_MAX_LEVEL
+
+        if macd_crossover and bollinger_breakout and vwap_confirmation and rsi_condition:
+            entry_price = last['close']
+            return {
+                "symbol": symbol, "entry_price": entry_price,
                 "take_profit": entry_price * (1 + TAKE_PROFIT_PERCENTAGE / 100),
                 "stop_loss": entry_price * (1 - STOP_LOSS_PERCENTAGE / 100),
-                "timestamp": last_row['timestamp']
+                "timestamp": last['timestamp'], "reason": "MACD Crossover & Bollinger Breakout"
             }
-            logging.info(f"💡 تم العثور على إشارة شراء محتملة لعملة {symbol}!")
-            return signal
     except Exception as e:
-        logging.error(f"❌ خطأ أثناء تحليل بيانات {symbol}: {e}")
+        logging.error(f"Error analyzing data for {symbol}: {e}")
     return None
 
 async def send_telegram_message(bot: Bot, signal):
+    """Formats and sends the trading signal to Telegram."""
     message = f"""
-🔔 *توصية جديدة* 🔔
+✅ *New Trading Signal* ✅
 
-*العملة:* `{signal['symbol']}`
-*نوع العملية:* `شراء (BUY)`
+*Symbol:* `{signal['symbol']}`
+*Strategy:* `{signal['reason']}`
+*Action:* `BUY`
 
-*سعر الدخول المقترح:* `${signal['entry_price']:,.4f}`
+*Entry Price:* `${signal['entry_price']:,.4f}`
 
-🎯 *الهدف (ربح {TAKE_PROFIT_PERCENTAGE}%):* `${signal['take_profit']:,.4f}`
-🛑 *وقف الخسارة (خسارة {STOP_LOSS_PERCENTAGE}%):* `${signal['stop_loss']:,.4f}`
+🎯 *Take Profit ({TAKE_PROFIT_PERCENTAGE}%):* `${signal['take_profit']:,.4f}`
+🛑 *Stop Loss ({STOP_LOSS_PERCENTAGE}%):* `${signal['stop_loss']:,.4f}`
 
-*تحذير: التداول ينطوي على مخاطر عالية.*
+*Disclaimer: High-risk trade. DYOR.*
 """
     try:
         await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
-        logging.info(f"✅ تم إرسال التوصية بنجاح إلى تليجرام.")
+        logging.info(f"Successfully sent signal for {signal['symbol']} to Telegram.")
+        log_recommendation(signal)
     except Exception as e:
-        logging.error(f"❌ فشل إرسال الرسالة إلى تليجرام: {e}")
+        logging.error(f"Failed to send message to Telegram: {e}")
+
+def log_recommendation(signal):
+    """Saves the sent signal to a CSV file for performance tracking."""
+    file_exists = os.path.isfile(PERFORMANCE_FILE)
+    df = pd.DataFrame([{'timestamp': signal['timestamp'], 'symbol': signal['symbol'], 'entry_price': signal['entry_price'],
+                        'take_profit': signal['take_profit'], 'stop_loss': signal['stop_loss'],
+                        'status': 'active', 'exit_price': None, 'closed_at': None}])
+    with open(PERFORMANCE_FILE, 'a') as f:
+        df.to_csv(f, header=not file_exists, index=False)
+    logging.info(f"Logged recommendation for {signal['symbol']}")
 
 async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
-    exchange = context.bot_data['exchange']
+    """Performs a single market scan for all watched symbols."""
+    exchange, symbols, last_signal_time = bot_data['exchange'], bot_data['symbols_to_watch'], bot_data['last_signal_time']
     found_signals = 0
-    logging.info("▶️  بدء جولة فحص للسوق...")
-    for symbol in SYMBOLS_TO_WATCH:
+    logging.info(f"Starting new market scan of {len(symbols)} symbols...")
+    for symbol in symbols:
         df = fetch_data(exchange, symbol, TIMEFRAME)
         if df is not None:
             signal = analyze_market_data(df, symbol)
             if signal:
                 current_time = time.time()
-                if symbol not in last_signal_time or (current_time - last_signal_time.get(symbol, 0)) > (LOOP_INTERVAL_SECONDS * 2):
+                if symbol not in last_signal_time or (current_time - last_signal_time.get(symbol, 0)) > (LOOP_INTERVAL_SECONDS * 4):
                     await send_telegram_message(context.bot, signal)
                     last_signal_time[symbol] = current_time
                     found_signals += 1
                 else:
-                    logging.info(f"ℹ️ تم تجاهل إشارة مكررة لعملة {symbol}.")
-    logging.info("⏹️  انتهاء جولة الفحص.")
-    return found_signals
+                    logging.info(f"Ignoring repeated signal for {symbol}.")
+    logging.info(f"Scan complete. Found {found_signals} new signals.")
 
-# --- Command Handlers, Jobs & Post Init ---
+## --- TELEGRAM HANDLERS (UPDATED) --- ##
 
-async def start_command(update, context):
-    await update.message.reply_text("أهلاً بك! أنا بوت تحليل السوق. أعمل تلقائياً في الخلفية. يمكنك استخدام الأمر /scan لطلب فحص يدوي فوري.")
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles the /start command and displays the main menu with persistent buttons."""
+    keyboard = [
+        ["📊 Statistics", "ℹ️ Help"],
+        ["🔍 Manual Scan"]
+    ]
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    await update.message.reply_text(
+        "Welcome to the Advanced Trading Bot! I am now monitoring the market. Use the buttons below to interact.",
+        reply_markup=reply_markup
+    )
 
-async def manual_scan_command(update, context):
-    await update.message.reply_text("👍 حسناً، جاري الفحص اليدوي للسوق الآن...")
-    found_signals_count = await perform_scan(context)
-    if found_signals_count == 0:
-        await update.message.reply_text("✅ اكتمل الفحص اليدوي. لم يتم العثور على فرص مطابقة للاستراتيجية حالياً.")
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Displays the help message."""
+    help_text = """
+*Advanced Trading Bot Help*
 
-async def timed_scan_job(context: ContextTypes.DEFAULT_TYPE):
+`🔍 Manual Scan` - Triggers an immediate market scan.
+`📊 Statistics` - Displays performance statistics of past signals.
+`ℹ️ Help` - Shows this help message.
+
+The bot automatically scans all MEXC USDT pairs (except BTC & ETH) every 15 minutes.
+"""
+    await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
+
+async def manual_scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles the manual scan request."""
+    await update.message.reply_text("👍 Roger that! Starting a manual market scan now...")
     await perform_scan(context)
+    await update.message.reply_text("✅ Manual scan complete.")
+
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Displays performance statistics."""
+    if not os.path.exists(PERFORMANCE_FILE):
+        await update.message.reply_text("No signals logged yet. Statistics are unavailable.")
+        return
+
+    df = pd.read_csv(PERFORMANCE_FILE)
+    total_recs, tp_hits, sl_hits, active_trades = len(df), len(df[df['status'] == 'tp_hit']), len(df[df['status'] == 'sl_hit']), len(df[df['status'] == 'active'])
+    win_rate = (tp_hits / (tp_hits + sl_hits) * 100) if (tp_hits + sl_hits) > 0 else 0
+    
+    stats_message = f"""
+*Performance Statistics*
+
+- *Total Signals Sent:* {total_recs}
+- *Active Trades:* {active_trades}
+- *Trades Hit Take Profit:* {tp_hits}
+- *Trades Hit Stop Loss:* {sl_hits}
+- *Win Rate (on closed trades):* `{win_rate:.2f}%`
+
+*Note: This is a simplified performance tracker.*
+"""
+    await update.message.reply_text(stats_message, parse_mode=ParseMode.MARKDOWN)
+
+async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles button presses from the custom keyboard."""
+    text = update.message.text
+    if text == "📊 Statistics":
+        await stats_command(update, context)
+    elif text == "ℹ️ Help":
+        await help_command(update, context)
+    elif text == "🔍 Manual Scan":
+        await manual_scan_command(update, context)
 
 async def post_init(application: Application):
-    """(جديد) إرسال رسالة عند بدء التشغيل - الطريقة الصحيحة."""
-    symbols_list_str = ", ".join(SYMBOLS_TO_WATCH)
-    message = f"""
-🚀 *تم تشغيل البوت بنجاح* 🚀
+    """Function to run after the bot is initialized."""
+    bot_data['exchange'] = get_exchange_client()
+    if not bot_data['exchange']:
+        logging.error("Could not connect to exchange. Bot cannot scan.")
+        return
+    bot_data['symbols_to_watch'] = await fetch_dynamic_symbols(bot_data['exchange'])
+    await application.bot.send_message(
+        chat_id=TELEGRAM_CHAT_ID,
+        text=f"🚀 *Bot is online and running!*\n- Strategy: `Advanced (MACD, BB, VWAP)`\n- Monitored Symbols: `{len(bot_data['symbols_to_watch'])}`",
+        parse_mode=ParseMode.MARKDOWN
+    )
+    application.job_queue.run_repeating(perform_scan, interval=LOOP_INTERVAL_SECONDS, first=10)
 
-*الحالة:* متصل وجاهز للعمل.
-*العملات قيد المراقبة:* `{symbols_list_str}`
-*الفاصل الزمني للفحص:* `{LOOP_INTERVAL_SECONDS // 60} دقائق`
-
-سأقوم بإعلامك فور العثور على فرصة مناسبة.
-"""
-    try:
-        await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
-        logging.info("✅ تم إرسال رسالة بدء التشغيل.")
-    except Exception as e:
-        logging.error(f"❌ فشل في إرسال رسالة بدء التشغيل: {e}")
-
-# --- MAIN EXECUTION ---
+## --- MAIN EXECUTION --- ##
 
 if __name__ == '__main__':
-    print("🚀 جارٍ بدء تشغيل البوت...")
-    
-    exchange_client = get_exchange_client()
-    if not exchange_client:
-        print("⏹️ لا يمكن بدء تشغيل البوت بدون اتصال ناجح بالمنصة.")
-        exit()
-
-    # إعداد تطبيق البوت مع دمج دالة post_init
+    print("🚀 Starting bot...")
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
-    
-    application.bot_data['exchange'] = exchange_client
 
+    # Handlers
     application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(CommandHandler("scan", manual_scan_command))
-
-    # جدولة الفحص التلقائي المتكرر
-    job_queue = application.job_queue
-    job_queue.run_repeating(timed_scan_job, interval=LOOP_INTERVAL_SECONDS, first=10)
-
-    # <<-- تم حذف سطر asyncio.run من هنا -->>
-
-    # تشغيل البوت
-    print("✅ البوت يعمل الآن ويستمع للأوامر...")
+    # This new handler processes text messages, which includes button clicks
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
+    
+    print("✅ Bot is polling for updates...")
     application.run_polling()
+
