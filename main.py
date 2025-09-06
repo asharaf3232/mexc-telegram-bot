@@ -14,7 +14,7 @@ from telegram.constants import ParseMode
 # 1. مفاتيح منصة MEXC
 # سيتم الآن قراءة هذه المفاتيح من متغيرات البيئة في الاستضافة
 MEXC_API_KEY = os.getenv('MEXC_API_KEY')
-MEXC_SECRET_KEY = os.getenv('MEXC_SECRET_KEY')
+MEXC_SECRET_KEY = os.getenv('MEXC_API_SECRET')
 
 # 2. إعدادات بوت التليجرام
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
