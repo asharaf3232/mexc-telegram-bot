@@ -32,11 +32,11 @@ TIMEFRAME = '15m'
 SCAN_INTERVAL_SECONDS = 900
 TRACK_INTERVAL_SECONDS = 120
 SETTINGS_FILE = 'settings.json'
-DB_FILE = 'trading_bot_v11.db'
+DB_FILE = 'trading_bot_v12.db'
 EGYPT_TZ = ZoneInfo("Africa/Cairo")
 
 # --- إعداد مسجل الأحداث (Logger) --- #
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO, handlers=[logging.FileHandler("bot_v11.log"), logging.StreamHandler()])
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO, handlers=[logging.FileHandler("bot_v12.log"), logging.StreamHandler()])
 logging.getLogger('httpx').setLevel(logging.WARNING)
 logging.getLogger('apscheduler').setLevel(logging.WARNING)
 logging.getLogger('telegram').setLevel(logging.WARNING)
@@ -415,7 +415,7 @@ async def run_backtest_logic(update: Update, symbol: str, timeframe: str, limit:
 main_menu_keyboard = [["📊 الإحصائيات", "📈 الصفقات النشطة"], ["🧪 اختبار تاريخي", "⚙️ الإعدادات"], ["👀 ماذا يجري في الخلفية؟", "ℹ️ مساعدة"]]
 settings_menu_keyboard = [["🎭 تفعيل/تعطيل الماسحات"], ["🔧 تعديل المعايير", "🔙 القائمة الرئيسية"]]
 
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("أهلاً بك في محاكي التداول المتقدم! (v11)", reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True))
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("أهلاً بك في محاكي التداول المتقدم! (v12)", reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True))
 async def show_settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target_message = update.message or update.callback_query.message
     await target_message.reply_text("اختر الإعداد الذي تريد تعديله:", reply_markup=ReplyKeyboardMarkup(settings_menu_keyboard, resize_keyboard=True))
@@ -434,9 +434,11 @@ async def show_scanners_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
     target_message = update.message or update.callback_query.message
     await target_message.reply_text("اختر الماسحات التي تريد تفعيلها أو تعطيلها:", reply_markup=get_scanners_keyboard())
 
-# [CORE FIX] This function now correctly handles the button toggles and UI updates.
+# [FINAL FIX] Rewrote the callback logic to be more robust.
 async def toggle_scanner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    await query.answer()
+    
     scanner_name = query.data.split("_")[1]
     active_scanners = bot_data["settings"].get("active_scanners", [])
     if scanner_name in active_scanners:
@@ -445,21 +447,27 @@ async def toggle_scanner_callback(update: Update, context: ContextTypes.DEFAULT_
         active_scanners.append(scanner_name)
     bot_data["settings"]["active_scanners"] = active_scanners
     save_settings()
-    await query.answer(f"تم {'تعطيل' if scanner_name not in active_scanners else 'تفعيل'} {scanner_name}")
-    
-    new_markup = get_scanners_keyboard()
-    try:
-        await query.edit_message_reply_markup(reply_markup=new_markup)
-    except BadRequest as e:
-        if "Message is not modified" not in str(e):
-            logging.error(f"Error editing scanner menu: {e}")
+
+    # This method is more reliable: delete the old menu and send a new one.
+    await query.message.delete()
+    await show_scanners_menu(update, context)
+
 
 async def show_set_parameter_instructions(update: Update, context: ContextTypes.DEFAULT_TYPE):
     params_list = "\n".join([f"`{k}`" for k, v in bot_data["settings"].items() if not isinstance(v, (dict, list))])
     message = (f"لتعديل معيار، أرسل:\n`اسم_المعيار = قيمة_جديدة`\n\n*المعايير القابلة للتعديل:*\n{params_list}")
     await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN, reply_markup=ReplyKeyboardMarkup([["🔙 قائمة الإعدادات"]], resize_keyboard=True))
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("*مساعدة البوت*\n`/start` - بدء\n`/check <ID>` - متابعة صفقة\n`/backtest <S> <T> <C>` - إجراء اختبار تاريخي.", parse_mode=ParseMode.MARKDOWN)
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE): 
+    await update.message.reply_text(
+        "*مساعدة البوت*\n"
+        "`/start` - بدء\n"
+        "`/check <ID>` - متابعة صفقة\n"
+        "`/backtest <S> <T> <C>` - إجراء اختبار تاريخي\n"
+        "`/debug` - فحص حالة البوت التشخيصية",
+        parse_mode=ParseMode.MARKDOWN
+    )
+
 async def backtest_instructions_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("لإجراء اختبار تاريخي، استخدم الأمر `/backtest`.\n\n"
         "🔹 *الصيغة:* `/backtest SYMBOL TIMEFRAME CANDLES`\n"
@@ -492,6 +500,50 @@ async def background_status_command(update: Update, context: ContextTypes.DEFAUL
         if next_scan_job and next_scan_job[0].next_t: next_scan_time = next_scan_job[0].next_t.astimezone(EGYPT_TZ).strftime('%H:%M:%S')
     message = (f"🤖 *حالة البوت في الخلفية*\n\n*{'🟢 الفحص قيد التنفيذ...' if status['scan_in_progress'] else '⚪️ البوت في وضع الاستعداد'}*\n\n- *آخر فحص بدأ:* `{status['last_scan_start_time']}`\n- *آخر فحص انتهى:* `{status['last_scan_end_time']}`\n- *العملات المفحوصة:* `{status['markets_found']}`\n- *الإشارات الجديدة:* `{status['signals_found']}`\n- *الصفقات النشطة:* `{status['active_trades_count']}`\n- *الفحص التالي:* `{next_scan_time}`")
     await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
+
+# [NEW] Diagnostic command as requested
+async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    report_parts = ["*🔍 تقرير التشخيص والحالة*"]
+
+    # 1. Database Check
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        conn.cursor().execute("SELECT COUNT(*) FROM trades")
+        conn.close()
+        report_parts.append("✅ *قاعدة البيانات:* متصلة وسليمة.")
+    except Exception as e:
+        report_parts.append(f"❌ *قاعدة البيانات:* فشل الاتصال! ({e})")
+
+    # 2. Exchanges Check
+    exchanges_status = []
+    for ex_id in EXCHANGES_TO_SCAN:
+        if ex_id in bot_data.get("exchanges", {}):
+            exchanges_status.append(f"  - `{ex_id}`: ✅ متصل")
+        else:
+            exchanges_status.append(f"  - `{ex_id}`: ❌ غير متصل")
+    report_parts.append("\n*📡 حالة الاتصال بالمنصات:*")
+    report_parts.extend(exchanges_status)
+    
+    # 3. Job Queue Check
+    report_parts.append("\n*⚙️ حالة المهام الخلفية:*")
+    if context.job_queue:
+        scan_job = context.job_queue.get_jobs_by_name('perform_scan')
+        track_job = context.job_queue.get_jobs_by_name('track_open_trades')
+        if scan_job:
+            next_run = scan_job[0].next_t.astimezone(EGYPT_TZ).strftime('%H:%M:%S')
+            report_parts.append(f"  - `مهمة الفحص`: ✅ نشطة (التالي: {next_run})")
+        else:
+            report_parts.append("  - `مهمة الفحص`: ❌ غير نشطة!")
+
+        if track_job:
+            next_run = track_job[0].next_t.astimezone(EGYPT_TZ).strftime('%H:%M:%S')
+            report_parts.append(f"  - `مهمة المتابعة`: ✅ نشطة (التالي: {next_run})")
+        else:
+             report_parts.append("  - `مهمة المتابعة`: ❌ غير نشطة!")
+    else:
+        report_parts.append("  - ❌ لم يتم العثور على مدير المهام!")
+
+    await update.message.reply_text("\n".join(report_parts), parse_mode=ParseMode.MARKDOWN)
 
 async def check_trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE, trade_id_from_callback=None):
     target_message = update.callback_query.message if trade_id_from_callback else update.message
@@ -528,12 +580,15 @@ async def show_active_trades_command(update: Update, context: ContextTypes.DEFAU
     await update.message.reply_text("اختر صفقة لمتابعتها مباشرة:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query; await query.answer()
+    query = update.callback_query; 
     if query.data.startswith("toggle_"): await toggle_scanner_callback(update, context)
     elif query.data == "back_to_settings":
+        await query.answer()
         await query.message.delete()
         await show_settings_menu(update, context)
-    elif query.data.startswith("check_"): await check_trade_command(update, context, trade_id_from_callback=int(query.data.split("_")[1]))
+    elif query.data.startswith("check_"): 
+        await query.answer()
+        await check_trade_command(update, context, trade_id_from_callback=int(query.data.split("_")[1]))
 
 async def main_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     handlers = {
@@ -579,13 +634,13 @@ async def post_init(application: Application):
     else:
         logging.error("Job queue not found in application object!")
     
-    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *محاكي التداول المتقدم (v11) جاهز للعمل!*", parse_mode=ParseMode.MARKDOWN)
+    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *محاكي التداول المتقدم (v12) جاهز للعمل!*", parse_mode=ParseMode.MARKDOWN)
     logging.info("Post-init finished.")
 
 async def post_shutdown(application: Application): await asyncio.gather(*[ex.close() for ex in bot_data["exchanges"].values()]); logging.info("Connections closed.")
 
 def main():
-    print("🚀 Starting Pro Trading Simulator Bot (v11)...")
+    print("🚀 Starting Pro Trading Simulator Bot (v12)...")
     load_settings(); init_database()
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).post_shutdown(post_shutdown).build()
     
@@ -593,6 +648,7 @@ def main():
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("check", check_trade_command))
     application.add_handler(CommandHandler("backtest", backtest_command))
+    application.add_handler(CommandHandler("debug", debug_command))
     application.add_handler(CallbackQueryHandler(button_callback_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, main_text_handler))
     
