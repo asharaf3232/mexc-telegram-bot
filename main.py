@@ -434,17 +434,14 @@ async def show_scanners_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
     target_message = update.message or update.callback_query.message
     await target_message.reply_text("اختر الماسحات التي تريد تفعيلها أو تعطيلها:", reply_markup=get_scanners_keyboard())
 
-# [FINAL FIX] Rewrote the callback logic to be more robust and explicit.
 async def toggle_scanner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    # query.answer() is called in the main handler
     
-    scanner_name = query.data.split("_")[1]
+    # [BUG FIX] Correctly extract the full scanner name, even if it contains underscores.
+    scanner_name = "_".join(query.data.split("_")[1:])
     
-    # Explicitly copy the list to avoid any potential reference issues
     active_scanners = bot_data["settings"].get("active_scanners", []).copy()
     
-    # Toggle the scanner's status in the new list
     if scanner_name in active_scanners:
         active_scanners.remove(scanner_name)
         logging.info(f"Deactivated scanner: {scanner_name}. New list: {active_scanners}")
@@ -452,11 +449,9 @@ async def toggle_scanner_callback(update: Update, context: ContextTypes.DEFAULT_
         active_scanners.append(scanner_name)
         logging.info(f"Activated scanner: {scanner_name}. New list: {active_scanners}")
 
-    # Assign the modified list back to the settings
     bot_data["settings"]["active_scanners"] = active_scanners
     save_settings()
 
-    # Edit the message with the updated keyboard
     try:
         await query.edit_message_text(
             text="اختر الماسحات التي تريد تفعيلها أو تعطيلها:",
@@ -464,7 +459,7 @@ async def toggle_scanner_callback(update: Update, context: ContextTypes.DEFAULT_
         )
     except BadRequest as e:
         if "Message is not modified" in str(e):
-            logging.warning(f"User clicked '{scanner_name}' but message was not modified. State might be out of sync.")
+            logging.warning(f"Ignored 'Message is not modified' error for {scanner_name}.")
         else:
             logging.error(f"A BadRequest error occurred: {e}", exc_info=True)
             raise
@@ -517,7 +512,6 @@ async def background_status_command(update: Update, context: ContextTypes.DEFAUL
     message = (f"🤖 *حالة البوت في الخلفية*\n\n*{'🟢 الفحص قيد التنفيذ...' if status['scan_in_progress'] else '⚪️ البوت في وضع الاستعداد'}*\n\n- *آخر فحص بدأ:* `{status['last_scan_start_time']}`\n- *آخر فحص انتهى:* `{status['last_scan_end_time']}`\n- *العملات المفحوصة:* `{status['markets_found']}`\n- *الإشارات الجديدة:* `{status['signals_found']}`\n- *الصفقات النشطة:* `{status['active_trades_count']}`\n- *الفحص التالي:* `{next_scan_time}`")
     await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
 
-# [NEW] Diagnostic command as requested
 async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     report_parts = ["*🔍 تقرير التشخيص والحالة*"]
 
@@ -559,6 +553,14 @@ async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         report_parts.append("  - ❌ لم يتم العثور على مدير المهام!")
 
+    # 4. Active Scanners Check (As requested by the user)
+    report_parts.append("\n*📊 حالة الماسحات (الاستراتيجيات):*")
+    settings = bot_data.get("settings", {})
+    active_scanners = settings.get("active_scanners", [])
+    for scanner in SCANNERS.keys():
+        status_icon = "✅" if scanner in active_scanners else "❌"
+        report_parts.append(f"  - `{scanner}`: {status_icon}")
+
     await update.message.reply_text("\n".join(report_parts), parse_mode=ParseMode.MARKDOWN)
 
 async def check_trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE, trade_id_from_callback=None):
@@ -595,18 +597,15 @@ async def show_active_trades_command(update: Update, context: ContextTypes.DEFAU
     keyboard = [[InlineKeyboardButton(f"ID: {t['id']} | {t['symbol']}", callback_data=f"check_{t['id']}")] for t in active_trades]
     await update.message.reply_text("اختر صفقة لمتابعتها مباشرة:", reply_markup=InlineKeyboardMarkup(keyboard))
 
-# [FINAL FIX] Corrected the main callback handler for all inline buttons.
 async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()  # Answer immediately for better user experience
+    await query.answer()
 
     data = query.data
     if data.startswith("toggle_"):
         await toggle_scanner_callback(update, context)
     elif data == "back_to_settings":
-        # First, delete the message with the inline keyboard
         await query.message.delete()
-        # Then, send a new message with the ReplyKeyboardMarkup for the settings menu
         await context.bot.send_message(
             chat_id=query.message.chat_id,
             text="اختر الإعداد الذي تريد تعديله:",
