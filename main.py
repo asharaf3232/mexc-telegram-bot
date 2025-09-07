@@ -45,15 +45,14 @@ SCAN_INTERVAL_SECONDS = 900
 TRACK_INTERVAL_SECONDS = 120
 
 APP_ROOT = '.' 
-DB_FILE = os.path.join(APP_ROOT, 'trading_bot_v16.db')
-SETTINGS_FILE = os.path.join(APP_ROOT, 'settings_v16.json')
+DB_FILE = os.path.join(APP_ROOT, 'trading_bot_v17.db')
+SETTINGS_FILE = os.path.join(APP_ROOT, 'settings_v17.json')
 
 
 EGYPT_TZ = ZoneInfo("Africa/Cairo")
 
 # --- إعداد مسجل الأحداث (Logger) --- #
-LOG_FILE = os.path.join(APP_ROOT, 'bot_v16.log')
-# [DEBUG FIX] Set filemode to 'w' to overwrite the log on each start, making it easier to read.
+LOG_FILE = os.path.join(APP_ROOT, 'bot_v17.log')
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO, handlers=[logging.FileHandler(LOG_FILE, 'w'), logging.StreamHandler()])
 logging.getLogger('httpx').setLevel(logging.WARNING)
 logging.getLogger('apscheduler').setLevel(logging.WARNING)
@@ -141,12 +140,15 @@ def log_recommendation_to_db(signal):
         return None
 
 # --- وحدات المسح المتقدمة (Scanners) --- #
-# [BUG FIX] This helper function robustly generates correct column names for pandas-ta
 def get_param_str(param_val):
-    """Converts a float to an int string if it's a whole number (e.g., 2.0 -> '2'), else returns the float as a string."""
-    return str(int(param_val)) if param_val == int(param_val) else str(param_val)
+    return str(int(param_val)) if isinstance(param_val, float) and param_val == int(param_val) else str(param_val)
 
 def analyze_momentum_breakout(df, params):
+    df.ta.vwap(append=True)
+    df.ta.bbands(length=params['bbands_period'], std=params['bbands_stddev'], append=True)
+    df.ta.macd(fast=params['macd_fast'], slow=params['macd_slow'], signal=params['macd_signal'], append=True)
+    df.ta.rsi(length=params['rsi_period'], append=True)
+
     std_str = get_param_str(params['bbands_stddev'])
     macd_col = f"MACD_{params['macd_fast']}_{params['macd_slow']}_{params['macd_signal']}"
     macds_col = f"MACDs_{params['macd_fast']}_{params['macd_slow']}_{params['macd_signal']}"
@@ -164,6 +166,10 @@ def analyze_momentum_breakout(df, params):
     return None
 
 def analyze_breakout_squeeze_pro(df, params):
+    df.ta.bbands(length=params['bbands_period'], std=params['bbands_stddev'], append=True)
+    df.ta.kc(length=params['keltner_period'], scalar=params['keltner_atr_multiplier'], append=True)
+    df.ta.obv(append=True)
+    
     std_str = get_param_str(params['bbands_stddev'])
     keltner_mult_str = get_param_str(params['keltner_atr_multiplier'])
 
@@ -193,6 +199,8 @@ def find_divergence_points(series, lookback):
 
 def analyze_rsi_divergence(df, params):
     if not SCIPY_AVAILABLE: return None
+    df.ta.rsi(length=params['rsi_period'], append=True)
+    
     rsi_col = f"RSI_{params['rsi_period']}"
     if df[rsi_col].isnull().all(): return None
 
@@ -218,6 +226,8 @@ def analyze_rsi_divergence(df, params):
     return None
 
 def analyze_supertrend_pullback(df, params):
+    df.ta.supertrend(length=params['atr_period'], multiplier=params['atr_multiplier'], append=True)
+
     mult_str = get_param_str(params['atr_multiplier'])
     st_dir_col = f"SUPERTd_{params['atr_period']}_{mult_str}"
     last, prev = df.iloc[-2], df.iloc[-3]
@@ -293,19 +303,18 @@ async def worker(queue, results_list, settings, failure_counter):
                 logging.info(f"HTF Trend Filter: PASSED ({reason}) for {symbol}")
 
             ohlcv = await exchange.fetch_ohlcv(symbol, TIMEFRAME, limit=200)
-            if len(ohlcv) < 100: logging.info(f"Skipping {symbol}: Not enough data ({len(ohlcv)} candles)"); continue
-            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']); df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms'); df.set_index('timestamp', inplace=True)
+            if len(ohlcv) < 100: 
+                logging.info(f"Skipping {symbol}: Not enough data ({len(ohlcv)} candles)")
+                continue
+
+            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']); 
+            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms'); 
+            df.set_index('timestamp', inplace=True)
             
+            # [REFACTOR] Calculate universal indicators once
             df.ta.adx(append=True)
             df.ta.atr(length=settings['atr_period'], append=True)
-            df.ta.obv(append=True)
-            df.ta.vwap(append=True)
-            df.ta.bbands(length=settings['momentum_breakout']['bbands_period'], std=settings['momentum_breakout']['bbands_stddev'], append=True)
-            df.ta.macd(fast=settings['momentum_breakout']['macd_fast'], slow=settings['momentum_breakout']['macd_slow'], signal=settings['momentum_breakout']['macd_signal'], append=True)
-            df.ta.rsi(length=settings['momentum_breakout']['rsi_period'], append=True)
-            df.ta.kc(length=settings['breakout_squeeze_pro']['keltner_period'], scalar=settings['breakout_squeeze_pro']['keltner_atr_multiplier'], append=True)
-            df.ta.supertrend(length=settings['supertrend_pullback']['atr_period'], multiplier=settings['supertrend_pullback']['atr_multiplier'], append=True)
-            
+
             if settings.get('use_master_trend_filter'):
                 adx_value = df[f'ADX_14'].iloc[-2]
                 if adx_value < settings['master_adx_filter_level']:
@@ -314,7 +323,7 @@ async def worker(queue, results_list, settings, failure_counter):
                 logging.info(f"ADX Filter: PASSED (ADX is {adx_value:.2f}) for {symbol}")
 
             for scanner_name in settings['active_scanners']:
-                analysis_result = SCANNERS.get(scanner_name)(df, settings.get(scanner_name, {}))
+                analysis_result = SCANNERS.get(scanner_name)(df.copy(), settings.get(scanner_name, {}))
                 if analysis_result and analysis_result.get("type") == "long":
                     logging.info(f"SIGNAL FOUND for {symbol} via {scanner_name}")
                     entry_price = df.iloc[-2]['close']
@@ -496,7 +505,7 @@ async def check_market_regime():
 # --- أوامر ولوحات مفاتيح تليجرام --- #
 main_menu_keyboard = [["📊 الإحصائيات", "📈 الصفقات النشطة"], ["⚙️ الإعدادات", "👀 ماذا يجري في الخلفية؟"], ["ℹ️ مساعدة", "🔬 فحص يدوي الآن"]]
 settings_menu_keyboard = [["🎭 تفعيل/تعطيل الماسحات"], ["🔧 تعديل المعايير", "🔙 القائمة الرئيسية"]]
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("أهلاً بك في محاكي التداول المتقدم! (v16)", reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True))
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("أهلاً بك في محاكي التداول المتقدم! (v17)", reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True))
 async def scan_now_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if bot_data['status_snapshot'].get('scan_in_progress', False): await update.message.reply_text("⚠️ فحص آخر قيد التنفيذ حالياً."); return
     await update.message.reply_text("⏳ جاري بدء الفحص اليدوي...")
@@ -669,11 +678,11 @@ async def post_init(application: Application):
         report_time = dt_time(hour=23, minute=55, tzinfo=EGYPT_TZ)
         application.job_queue.run_daily(send_daily_report, time=report_time, name='daily_report')
         logging.info(f"Daily report scheduled for {report_time.strftime('%H:%M:%S')} {EGYPT_TZ}.")
-    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *محاكي التداول المتقدم (v16 - STABLE) جاهز للعمل!*", parse_mode=ParseMode.MARKDOWN)
+    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *محاكي التداول المتقدم (v17 - STABLE) جاهز للعمل!*", parse_mode=ParseMode.MARKDOWN)
     logging.info("Post-init finished.")
 async def post_shutdown(application: Application): await asyncio.gather(*[ex.close() for ex in bot_data["exchanges"].values()]); logging.info("Connections closed.")
 def main():
-    print("🚀 Starting Pro Trading Simulator Bot (v16 - STABLE)...")
+    print("🚀 Starting Pro Trading Simulator Bot (v17 - STABLE)...")
     load_settings(); init_database()
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).post_shutdown(post_shutdown).build()
     application.add_handler(CommandHandler("start", start_command)); application.add_handler(CommandHandler("scan", scan_now_command))
