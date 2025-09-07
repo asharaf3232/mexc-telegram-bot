@@ -234,8 +234,6 @@ async def aggregate_top_movers():
     results = await asyncio.gather(*[fetch(ex_id, ex) for ex_id, ex in bot_data["exchanges"].items()])
     for res in results: all_tickers.extend(res)
     
-    # [FINAL PAIR FILTER] This is the crucial fix. Ensure we only trade crypto pairs where USDT is the quote currency.
-    # This filters out fiat pairs like USDT/ARS and inverse pairs.
     usdt_tickers = [
         t for t in all_tickers 
         if t.get('symbol') 
@@ -243,11 +241,16 @@ async def aggregate_top_movers():
         and not any(k in t['symbol'].upper() for k in ['UP','DOWN','3L','3S','BEAR','BULL'])
     ]
 
-    # [FINAL LOGIC FIX] Sort the *filtered* list by volume, not the original one.
     sorted_tickers = sorted(usdt_tickers, key=lambda t: t.get('quoteVolume', 0) or 0, reverse=True)
     
-    # Use a dictionary to ensure each symbol is unique, preferring the one from the exchange with higher volume
-    unique_symbols = {t['symbol']: {'exchange': t['exchange'], 'symbol': t['symbol']} for t in sorted_tickers}
+    # [BINANCE DISAPPEARING FIX] Correct logic to get unique symbols based on the highest volume.
+    # The previous dictionary comprehension was overwriting high-volume pairs with lower-volume ones.
+    unique_symbols = {}
+    for ticker in sorted_tickers:
+        symbol = ticker['symbol']
+        if symbol not in unique_symbols: # This ensures the first one seen (the one with the highest volume) is kept.
+            unique_symbols[symbol] = {'exchange': ticker['exchange'], 'symbol': symbol}
+
     final_list = list(unique_symbols.values())[:bot_data["settings"]['top_n_symbols_by_volume']]
     
     logging.info(f"Aggregated markets. Found {len(all_tickers)} total tickers, filtered down to {len(usdt_tickers)} USDT pairs, selected top {len(final_list)} unique pairs by volume.")
