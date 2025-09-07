@@ -41,20 +41,20 @@ TIMEFRAME = '15m'
 SCAN_INTERVAL_SECONDS = 900
 TRACK_INTERVAL_SECONDS = 120
 
-# [FINAL FIX] Create a dedicated data directory next to the script to ensure
-# all processes (main and background jobs) use the exact same shared files.
-script_dir = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.path.join(script_dir, 'bot_data')
-os.makedirs(DATA_DIR, exist_ok=True) # Create the directory if it doesn't exist
-
-DB_FILE = os.path.join(DATA_DIR, 'trading_bot_v12.db')
-SETTINGS_FILE = os.path.join(DATA_DIR, 'settings.json')
+# [FINAL PERSISTENCE FIX] Hardcode the data file paths to the application's root directory.
+# This ensures that all isolated processes in the cloud environment (main app, job queue workers)
+# read from and write to the exact same shared files, solving the "file not found" issue.
+APP_ROOT = '/app'
+DB_FILE = os.path.join(APP_ROOT, 'trading_bot_v12.db')
+SETTINGS_FILE = os.path.join(APP_ROOT, 'settings.json')
 
 
 EGYPT_TZ = ZoneInfo("Africa/Cairo")
 
 # --- إعداد مسجل الأحداث (Logger) --- #
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO, handlers=[logging.FileHandler("bot_v12.log"), logging.StreamHandler()])
+# Log file will also be placed in the app root to be easily accessible.
+LOG_FILE = os.path.join(APP_ROOT, 'bot_v12.log')
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO, handlers=[logging.FileHandler(LOG_FILE), logging.StreamHandler()])
 logging.getLogger('httpx').setLevel(logging.WARNING)
 logging.getLogger('apscheduler').setLevel(logging.WARNING)
 logging.getLogger('telegram').setLevel(logging.WARNING)
@@ -76,45 +76,60 @@ DEFAULT_SETTINGS = {
 }
 
 def load_settings():
-    if os.path.exists(SETTINGS_FILE):
-        with open(SETTINGS_FILE, 'r') as f: bot_data["settings"] = json.load(f)
-        updated = False
-        for key, value in DEFAULT_SETTINGS.items():
-            if key not in bot_data["settings"]:
-                bot_data["settings"][key] = value; updated = True
-            elif isinstance(value, dict):
-                 for sub_key, sub_value in value.items():
-                     if sub_key not in bot_data["settings"].get(key, {}):
-                         bot_data["settings"][key][sub_key] = sub_value; updated = True
-        if updated: save_settings()
-    else:
+    try:
+        if os.path.exists(SETTINGS_FILE):
+            with open(SETTINGS_FILE, 'r') as f: bot_data["settings"] = json.load(f)
+            updated = False
+            for key, value in DEFAULT_SETTINGS.items():
+                if key not in bot_data["settings"]:
+                    bot_data["settings"][key] = value; updated = True
+                elif isinstance(value, dict):
+                     for sub_key, sub_value in value.items():
+                         if sub_key not in bot_data["settings"].get(key, {}):
+                             bot_data["settings"][key][sub_key] = sub_value; updated = True
+            if updated: save_settings()
+        else:
+            bot_data["settings"] = DEFAULT_SETTINGS
+            save_settings()
+        logging.info(f"Settings loaded successfully from {SETTINGS_FILE}")
+    except Exception as e:
+        logging.error(f"Failed to load settings: {e}")
         bot_data["settings"] = DEFAULT_SETTINGS
-        save_settings()
-    logging.info(f"Settings loaded successfully from {SETTINGS_FILE}")
+
 
 def save_settings():
-    with open(SETTINGS_FILE, 'w') as f: json.dump(bot_data["settings"], f, indent=4)
-    logging.info(f"Settings saved successfully to {SETTINGS_FILE}")
+    try:
+        with open(SETTINGS_FILE, 'w') as f: json.dump(bot_data["settings"], f, indent=4)
+        logging.info(f"Settings saved successfully to {SETTINGS_FILE}")
+    except Exception as e:
+        logging.error(f"Failed to save settings: {e}")
 
 # --- إدارة قاعدة البيانات --- #
 def init_database():
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS trades (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT, exchange TEXT, symbol TEXT, entry_price REAL, take_profit REAL, stop_loss REAL, quantity REAL, entry_value_usdt REAL, status TEXT, exit_price REAL, closed_at TEXT, exit_value_usdt REAL, pnl_usdt REAL, trailing_sl_active BOOLEAN, highest_price REAL, reason TEXT)
-    ''')
-    conn.commit()
-    conn.close()
-    logging.info(f"Database initialized successfully at: {DB_FILE}")
+    try:
+        conn = sqlite3.connect(DB_FILE, timeout=10)
+        cursor = conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS trades (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT, exchange TEXT, symbol TEXT, entry_price REAL, take_profit REAL, stop_loss REAL, quantity REAL, entry_value_usdt REAL, status TEXT, exit_price REAL, closed_at TEXT, exit_value_usdt REAL, pnl_usdt REAL, trailing_sl_active BOOLEAN, highest_price REAL, reason TEXT)
+        ''')
+        conn.commit()
+        conn.close()
+        logging.info(f"Database initialized successfully at: {DB_FILE}")
+    except Exception as e:
+        logging.error(f"Failed to initialize database at {DB_FILE}: {e}")
 
 def log_recommendation_to_db(signal):
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute('INSERT INTO trades (timestamp, exchange, symbol, entry_price, take_profit, stop_loss, quantity, entry_value_usdt, status, trailing_sl_active, highest_price, reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', (signal['timestamp'].strftime('%Y-%m-%d %H:%M:%S'), signal['exchange'], signal['symbol'], signal['entry_price'], signal['take_profit'], signal['stop_loss'], signal['quantity'], signal['entry_value_usdt'], 'نشطة', False, signal['entry_price'], signal['reason']))
-    trade_id = cursor.lastrowid
-    conn.commit()
-    conn.close()
-    return trade_id
+    try:
+        conn = sqlite3.connect(DB_FILE, timeout=10)
+        cursor = conn.cursor()
+        cursor.execute('INSERT INTO trades (timestamp, exchange, symbol, entry_price, take_profit, stop_loss, quantity, entry_value_usdt, status, trailing_sl_active, highest_price, reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', (signal['timestamp'].strftime('%Y-%m-%d %H:%M:%S'), signal['exchange'], signal['symbol'], signal['entry_price'], signal['take_profit'], signal['stop_loss'], signal['quantity'], signal['entry_value_usdt'], 'نشطة', False, signal['entry_price'], signal['reason']))
+        trade_id = cursor.lastrowid
+        conn.commit()
+        conn.close()
+        return trade_id
+    except Exception as e:
+        logging.error(f"Failed to log recommendation to DB: {e}")
+        return None
 
 # --- وحدات المسح المتقدمة (Scanners) --- #
 def analyze_momentum_breakout(df, params):
@@ -262,7 +277,16 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
     status.update({"scan_in_progress": True, "last_scan_start_time": datetime.now(EGYPT_TZ).strftime('%Y-%m-%d %H:%M:%S'), "signals_found": 0})
     settings = bot_data["settings"]
     
-    conn = sqlite3.connect(DB_FILE); cursor = conn.cursor(); cursor.execute("SELECT COUNT(*) FROM trades WHERE status = 'نشطة'"); active_trades_count = cursor.fetchone()[0]; conn.close()
+    try:
+        conn = sqlite3.connect(DB_FILE, timeout=10)
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM trades WHERE status = 'نشطة'")
+        active_trades_count = cursor.fetchone()[0]
+        conn.close()
+    except Exception as e:
+        logging.error(f"DB Error in perform_scan: {e}")
+        active_trades_count = 0
+
     if active_trades_count >= settings.get("max_concurrent_trades", 3):
         logging.info("Skipping scan: Max concurrent trades limit reached."); status['scan_in_progress'] = False; return
 
@@ -283,10 +307,12 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
         if symbol not in last_signal_time or (current_time - last_signal_time.get(symbol, 0)) > (SCAN_INTERVAL_SECONDS * 4):
             trade_amount_usdt = settings["virtual_portfolio_balance_usdt"] * (settings["virtual_trade_size_percentage"] / 100)
             signal.update({'quantity': trade_amount_usdt / signal['entry_price'], 'entry_value_usdt': trade_amount_usdt})
-            trade_id = log_recommendation_to_db(signal); signal['trade_id'] = trade_id
-            await send_telegram_message(context.bot, signal, is_new=True)
-            last_signal_time[symbol] = current_time
-            status['signals_found'] += 1; active_trades_count += 1
+            trade_id = log_recommendation_to_db(signal)
+            if trade_id:
+                signal['trade_id'] = trade_id
+                await send_telegram_message(context.bot, signal, is_new=True)
+                last_signal_time[symbol] = current_time
+                status['signals_found'] += 1; active_trades_count += 1
             
     status['last_scan_end_time'] = datetime.now(EGYPT_TZ).strftime('%Y-%m-%d %H:%M:%S'); status['scan_in_progress'] = False
 
@@ -300,12 +326,21 @@ async def send_telegram_message(bot, signal_data, is_new=False, status_update=No
         icon, title, pnl_label = ("🎯", "هدف محقق!", "الربح") if status_update == 'ناجحة' else ("🛑", "تم تفعيل وقف الخسارة", "الخسارة")
         message = f"{icon} *{title}* {icon}\n\n*العملة:* `{signal_data['symbol']}`\n*{pnl_label}:* `~${abs(signal_data['pnl_usdt']):.2f} ({pnl_percent:+.2f}%)`"
     elif update_type == 'tsl_activation': message = f"🔒 *تأمين أرباح* 🔒\n\n*العملة:* `{signal_data['symbol']}`\nتم نقل وقف الخسارة إلى `${signal_data['stop_loss']:,.4f}`."
-    if message: await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
+    if message:
+        try:
+            await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
+        except Exception as e:
+            logging.error(f"Failed to send message: {e}")
 
 async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
-    conn = sqlite3.connect(DB_FILE); conn.row_factory = sqlite3.Row; cursor = conn.cursor()
-    cursor.execute("SELECT * FROM trades WHERE status = 'نشطة'")
-    active_trades = [dict(row) for row in cursor.fetchall()]; conn.close()
+    try:
+        conn = sqlite3.connect(DB_FILE, timeout=10); conn.row_factory = sqlite3.Row; cursor = conn.cursor()
+        cursor.execute("SELECT * FROM trades WHERE status = 'نشطة'")
+        active_trades = [dict(row) for row in cursor.fetchall()]; conn.close()
+    except Exception as e:
+        logging.error(f"DB error in track_open_trades: {e}")
+        return
+
     bot_data['status_snapshot']['active_trades_count'] = len(active_trades)
     if not active_trades: return
     
@@ -350,7 +385,16 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
         elif status == 'update_sl': updates_to_db.append(("UPDATE trades SET stop_loss=?, highest_price=? WHERE id=?", (result['new_sl'], result['highest_price'], result['id'])))
         elif status == 'update_peak': updates_to_db.append(("UPDATE trades SET highest_price=? WHERE id=?", (result['highest_price'], result['id'])))
     
-    if updates_to_db: conn = sqlite3.connect(DB_FILE); cursor = conn.cursor(); [cursor.execute(q, p) for q, p in updates_to_db]; conn.commit(); conn.close()
+    if updates_to_db:
+        try:
+            conn = sqlite3.connect(DB_FILE, timeout=10)
+            cursor = conn.cursor()
+            [cursor.execute(q, p) for q, p in updates_to_db]
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logging.error(f"DB update failed in track_open_trades: {e}")
+
     if portfolio_pnl != 0.0: bot_data['settings']['virtual_portfolio_balance_usdt'] += portfolio_pnl; save_settings(); logging.info(f"Portfolio balance updated by ${portfolio_pnl:.2f}.")
 
 async def check_market_regime():
@@ -533,13 +577,19 @@ async def backtest_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        conn = sqlite3.connect(DB_FILE); cursor = conn.cursor(); cursor.execute("SELECT status, COUNT(*), SUM(pnl_usdt) FROM trades GROUP BY status"); stats_data = cursor.fetchall(); conn.close()
+        conn = sqlite3.connect(DB_FILE, timeout=10)
+        cursor = conn.cursor()
+        cursor.execute("SELECT status, COUNT(*), SUM(pnl_usdt) FROM trades GROUP BY status")
+        stats_data = cursor.fetchall()
+        conn.close()
         counts = {s: c for s, c, p in stats_data}; pnl = {s: (p if p is not None else 0) for s, c, p in stats_data}
         total = sum(counts.values()); active = counts.get('نشطة', 0); successful = counts.get('ناجحة', 0); failed = counts.get('فاشلة', 0)
         closed_trades = successful + failed; win_rate = (successful / closed_trades * 100) if closed_trades > 0 else 0; total_pnl = sum(pnl.values())
         stats_message = (f"*📊 إحصائيات المحفظة*\n\n📈 *الرصيد الحالي:* `${bot_data['settings']['virtual_portfolio_balance_usdt']:.2f}`\n💰 *إجمالي الربح/الخسارة:* `${total_pnl:+.2f}`\n\n- *إجمالي الصفقات:* `{total}` (`{active}` نشطة)\n- *الناجحة:* `{successful}` | *الربح:* `${pnl.get('ناجحة', 0):.2f}`\n- *الفاشلة:* `{failed}` | *الخسارة:* `${abs(pnl.get('فاشلة', 0)):.2f}`\n- *معدل النجاح:* `{win_rate:.2f}%`")
         await update.message.reply_text(stats_message, parse_mode=ParseMode.MARKDOWN)
-    except Exception as e: logging.error(f"Error in stats_command: {e}", exc_info=True)
+    except Exception as e:
+        logging.error(f"Error in stats_command: {e}", exc_info=True)
+        await update.message.reply_text("حدث خطأ أثناء جلب الإحصائيات.")
 
 async def background_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status = bot_data['status_snapshot']; next_scan_time = "N/A"
@@ -554,10 +604,12 @@ async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 1. Database Check
     try:
-        conn = sqlite3.connect(DB_FILE)
-        conn.cursor().execute("SELECT COUNT(*) FROM trades")
+        conn = sqlite3.connect(DB_FILE, timeout=10)
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM trades")
+        count = cursor.fetchone()[0]
         conn.close()
-        report_parts.append("✅ *قاعدة البيانات:* متصلة وسليمة.")
+        report_parts.append(f"✅ *قاعدة البيانات:* متصلة وسليمة ({count} trades recorded).")
     except Exception as e:
         report_parts.append(f"❌ *قاعدة البيانات:* فشل الاتصال! ({e})")
 
@@ -604,35 +656,52 @@ async def check_trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     target_message = update.callback_query.message if trade_id_from_callback else update.message
     try:
         trade_id = trade_id_from_callback if trade_id_from_callback else int(context.args[0])
-        conn = sqlite3.connect(DB_FILE); conn.row_factory = sqlite3.Row; cursor = conn.cursor(); cursor.execute("SELECT * FROM trades WHERE id = ?", (trade_id,)); trade = dict(cursor.fetchone()) if cursor.rowcount > 0 else None; conn.close()
+        conn = sqlite3.connect(DB_FILE, timeout=10); conn.row_factory = sqlite3.Row; cursor = conn.cursor(); cursor.execute("SELECT * FROM trades WHERE id = ?", (trade_id,)); 
+        trade_row = cursor.fetchone()
+        trade = dict(trade_row) if trade_row else None
+        conn.close()
+
         if not trade:
             await target_message.reply_text(f"لم يتم العثور على صفقة بالرقم `{trade_id}`.", parse_mode=ParseMode.MARKDOWN)
             return
         
         message = ""
         if trade['status'] != 'نشطة':
-            pnl_percent = (trade['pnl_usdt'] / trade['entry_value_usdt'] * 100) if trade['entry_value_usdt'] != 0 else 0
+            pnl_percent = (trade['pnl_usdt'] / trade['entry_value_usdt'] * 100) if trade.get('entry_value_usdt') and trade['entry_value_usdt'] != 0 else 0
             closed_at_dt = datetime.strptime(trade['closed_at'], '%Y-%m-%d %H:%M:%S')
-            message = f"📋 *ملخص الصفقة المغلقة #{trade_id}*\n\n*العملة:* `{trade['symbol']}`\n*الحالة:* `{trade['status']}`\n*تاريخ الإغلاق:* `{closed_at_dt.strftime('%Y-%m-%d %I:%M %p')}`\n*الربح/الخسارة:* `${trade['pnl_usdt']:+.2f} ({pnl_percent:+.2f}%)`"
+            message = f"📋 *ملخص الصفقة المغلقة #{trade_id}*\n\n*العملة:* `{trade['symbol']}`\n*الحالة:* `{trade['status']}`\n*تاريخ الإغلاق:* `{closed_at_dt.strftime('%Y-%m-%d %I:%M %p')}`\n*الربح/الخسارة:* `${trade.get('pnl_usdt', 0):+.2f} ({pnl_percent:+.2f}%)`"
         else:
             exchange = bot_data["exchanges"].get(trade['exchange'].lower())
             if not exchange: await target_message.reply_text("المنصة غير متصلة حالياً."); return
             ticker = await exchange.fetch_ticker(trade['symbol']); current_price = ticker.get('last') or ticker.get('close')
-            live_pnl = (current_price - trade['entry_price']) * trade['quantity']; live_pnl_percent = (live_pnl / trade['entry_value_usdt'] * 100) if trade['entry_value_usdt'] != 0 else 0
+            
+            if current_price is None:
+                await target_message.reply_text(f"لم أتمكن من جلب السعر الحالي لـ `{trade['symbol']}`.", parse_mode=ParseMode.MARKDOWN)
+                return
+
+            live_pnl = (current_price - trade['entry_price']) * trade['quantity']
+            live_pnl_percent = (live_pnl / trade['entry_value_usdt'] * 100) if trade.get('entry_value_usdt') and trade['entry_value_usdt'] != 0 else 0
             message = f"📈 *متابعة حية للصفقة #{trade_id}*\n\n*العملة:* `{trade['symbol']}`\n*الحالة:* `نشطة`\n\n*سعر الدخول:* `${trade['entry_price']:,.4f}`\n*السعر الحالي:* `${current_price:,.4f}`\n\n💰 *الربح/الخسارة الحالية:*\n`${live_pnl:+.2f} ({live_pnl_percent:+.2f}%)`"
         
         await target_message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
     except (ValueError, IndexError): await target_message.reply_text("رقم صفقة غير صالح. مثال: `/check 17`")
-    except Exception as e: logging.error(f"Error in check_trade_command: {e}", exc_info=True)
+    except Exception as e:
+        logging.error(f"Error in check_trade_command: {e}", exc_info=True)
+        await target_message.reply_text("حدث خطأ أثناء فحص الصفقة.")
+
 
 async def show_active_trades_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    conn = sqlite3.connect(DB_FILE); conn.row_factory = sqlite3.Row; cursor = conn.cursor()
-    cursor.execute("SELECT id, symbol FROM trades WHERE status = 'نشطة' ORDER BY id DESC")
-    active_trades = cursor.fetchall(); conn.close()
-    if not active_trades:
-        await update.message.reply_text("لا توجد صفقات نشطة حالياً."); return
-    keyboard = [[InlineKeyboardButton(f"ID: {t['id']} | {t['symbol']}", callback_data=f"check_{t['id']}")] for t in active_trades]
-    await update.message.reply_text("اختر صفقة لمتابعتها مباشرة:", reply_markup=InlineKeyboardMarkup(keyboard))
+    try:
+        conn = sqlite3.connect(DB_FILE, timeout=10); conn.row_factory = sqlite3.Row; cursor = conn.cursor()
+        cursor.execute("SELECT id, symbol FROM trades WHERE status = 'نشطة' ORDER BY id DESC")
+        active_trades = cursor.fetchall(); conn.close()
+        if not active_trades:
+            await update.message.reply_text("لا توجد صفقات نشطة حالياً."); return
+        keyboard = [[InlineKeyboardButton(f"ID: {t['id']} | {t['symbol']}", callback_data=f"check_{t['id']}")] for t in active_trades]
+        await update.message.reply_text("اختر صفقة لمتابعتها مباشرة:", reply_markup=InlineKeyboardMarkup(keyboard))
+    except Exception as e:
+        logging.error(f"Error in show_active_trades_command: {e}")
+        await update.message.reply_text("حدث خطأ أثناء جلب الصفقات النشطة.")
 
 async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
