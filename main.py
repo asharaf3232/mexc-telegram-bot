@@ -32,11 +32,11 @@ TIMEFRAME = '15m'
 SCAN_INTERVAL_SECONDS = 900
 TRACK_INTERVAL_SECONDS = 120
 SETTINGS_FILE = 'settings.json'
-DB_FILE = 'trading_bot_v13.db'
+DB_FILE = 'trading_bot_v12.db'
 EGYPT_TZ = ZoneInfo("Africa/Cairo")
 
 # --- إعداد مسجل الأحداث (Logger) --- #
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO, handlers=[logging.FileHandler("bot_v13.log"), logging.StreamHandler()])
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO, handlers=[logging.FileHandler("bot_v12.log"), logging.StreamHandler()])
 logging.getLogger('httpx').setLevel(logging.WARNING)
 logging.getLogger('apscheduler').setLevel(logging.WARNING)
 logging.getLogger('telegram').setLevel(logging.WARNING)
@@ -415,7 +415,7 @@ async def run_backtest_logic(update: Update, symbol: str, timeframe: str, limit:
 main_menu_keyboard = [["📊 الإحصائيات", "📈 الصفقات النشطة"], ["🧪 اختبار تاريخي", "⚙️ الإعدادات"], ["👀 ماذا يجري في الخلفية؟", "ℹ️ مساعدة"]]
 settings_menu_keyboard = [["🎭 تفعيل/تعطيل الماسحات"], ["🔧 تعديل المعايير", "🔙 القائمة الرئيسية"]]
 
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("أهلاً بك في محاكي التداول المتقدم! (v13)", reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True))
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("أهلاً بك في محاكي التداول المتقدم! (v12)", reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True))
 async def show_settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target_message = update.message or update.callback_query.message
     await target_message.reply_text("اختر الإعداد الذي تريد تعديله:", reply_markup=ReplyKeyboardMarkup(settings_menu_keyboard, resize_keyboard=True))
@@ -434,14 +434,13 @@ async def show_scanners_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
     target_message = update.message or update.callback_query.message
     await target_message.reply_text("اختر الماسحات التي تريد تفعيلها أو تعطيلها:", reply_markup=get_scanners_keyboard())
 
-# [DEFINITIVE FIX] This callback now deletes the old message and sends a fresh one to guarantee UI update.
+# [FIXED] The callback logic is now corrected to edit the message instead of deleting it.
 async def toggle_scanner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
     scanner_name = query.data.split("_")[1]
     active_scanners = bot_data["settings"].get("active_scanners", [])
-    
     if scanner_name in active_scanners:
         active_scanners.remove(scanner_name)
     else:
@@ -449,13 +448,19 @@ async def toggle_scanner_callback(update: Update, context: ContextTypes.DEFAULT_
     bot_data["settings"]["active_scanners"] = active_scanners
     save_settings()
 
+    # Edit the message with the new keyboard to reflect the change
     try:
-        await query.message.delete()
+        await query.edit_message_text(
+            text="اختر الماسحات التي تريد تفعيلها أو تعطيلها:",
+            reply_markup=get_scanners_keyboard()
+        )
     except BadRequest as e:
-        logging.warning(f"Could not delete scanner menu message (might have been deleted already): {e}")
-
-    await show_scanners_menu(update, context)
-
+        if "Message is not modified" in str(e):
+            # This is not a critical error, just means the user clicked the same button twice fast.
+            logging.info("Ignored 'Message is not modified' error.")
+        else:
+            # Re-raise other BadRequest errors.
+            raise
 
 async def show_set_parameter_instructions(update: Update, context: ContextTypes.DEFAULT_TYPE):
     params_list = "\n".join([f"`{k}`" for k, v in bot_data["settings"].items() if not isinstance(v, (dict, list))])
@@ -638,13 +643,13 @@ async def post_init(application: Application):
     else:
         logging.error("Job queue not found in application object!")
     
-    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *محاكي التداول المتقدم (v13) جاهز للعمل!*", parse_mode=ParseMode.MARKDOWN)
+    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *محاكي التداول المتقدم (v12) جاهز للعمل!*", parse_mode=ParseMode.MARKDOWN)
     logging.info("Post-init finished.")
 
 async def post_shutdown(application: Application): await asyncio.gather(*[ex.close() for ex in bot_data["exchanges"].values()]); logging.info("Connections closed.")
 
 def main():
-    print("🚀 Starting Pro Trading Simulator Bot (v13)...")
+    print("🚀 Starting Pro Trading Simulator Bot (v12)...")
     load_settings(); init_database()
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).post_shutdown(post_shutdown).build()
     
@@ -665,4 +670,3 @@ def main():
 if __name__ == '__main__':
     try: main()
     except Exception as e: logging.critical(f"Bot stopped due to a critical error in __main__: {e}", exc_info=True)
-
