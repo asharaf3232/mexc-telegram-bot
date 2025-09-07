@@ -45,14 +45,14 @@ SCAN_INTERVAL_SECONDS = 900
 TRACK_INTERVAL_SECONDS = 120
 
 APP_ROOT = '.'
-DB_FILE = os.path.join(APP_ROOT, 'trading_bot_v19.db')
-SETTINGS_FILE = os.path.join(APP_ROOT, 'settings_v19.json')
+DB_FILE = os.path.join(APP_ROOT, 'trading_bot_v20.db')
+SETTINGS_FILE = os.path.join(APP_ROOT, 'settings_v20.json')
 
 
 EGYPT_TZ = ZoneInfo("Africa/Cairo")
 
 # --- إعداد مسجل الأحداث (Logger) --- #
-LOG_FILE = os.path.join(APP_ROOT, 'bot_v19.log')
+LOG_FILE = os.path.join(APP_ROOT, 'bot_v20.log')
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO, handlers=[logging.FileHandler(LOG_FILE, 'w'), logging.StreamHandler()])
 logging.getLogger('httpx').setLevel(logging.WARNING)
 logging.getLogger('apscheduler').setLevel(logging.WARNING)
@@ -72,7 +72,13 @@ DEFAULT_SETTINGS = {
     "momentum_breakout": {"vwap_period": 14, "macd_fast": 12, "macd_slow": 26, "macd_signal": 9, "bbands_period": 20, "bbands_stddev": 2.0, "rsi_period": 14, "rsi_max_level": 68, "volume_spike_multiplier": 1.5},
     "breakout_squeeze_pro": {"bbands_period": 20, "bbands_stddev": 2.0, "keltner_period": 20, "keltner_atr_multiplier": 1.5, "volume_confirmation_enabled": True},
     "rsi_divergence": {"rsi_period": 14, "lookback_period": 35, "peak_trough_lookback": 5, "confirm_with_rsi_exit": True},
-    "supertrend_pullback": {"atr_period": 10, "atr_multiplier": 3.0}
+    "supertrend_pullback": {"atr_period": 10, "atr_multiplier": 3.0, "swing_high_lookback": 10},
+    # --- [IMPROVEMENT] New Filters --- #
+    "liquidity_filters": {"min_quote_volume_24h_usd": 1_000_000, "max_spread_percent": 0.5, "rvol_period": 20, "min_rvol": 1.5},
+    "volatility_filters": {"atr_period_for_filter": 14, "min_atr_percent": 0.8},
+    "stablecoin_filter": {"exclude_bases": ["USDT","USDC","DAI","FDUSD","TUSD","USDE","PYUSD","GUSD","EURT","USDJ"]},
+    "ema_trend_filter": {"enabled": True, "ema_period": 200},
+    "min_tp_sl_filter": {"min_tp_percent": 1.0, "min_sl_percent": 0.5}
 }
 
 
@@ -140,21 +146,18 @@ def log_recommendation_to_db(signal):
         return None
 
 # --- وحدات المسح المتقدمة (Scanners) --- #
-# [FINAL ROBUST FIX] New helper function to find column names without predicting the exact format.
 def find_col(df_columns, prefix):
-    """Finds a column in a list of columns that starts with a given prefix."""
     try:
         return next(col for col in df_columns if col.startswith(prefix))
     except StopIteration:
         return None
 
-def analyze_momentum_breakout(df, params):
+def analyze_momentum_breakout(df, params, rvol):
     df.ta.vwap(append=True)
     df.ta.bbands(length=params['bbands_period'], std=params['bbands_stddev'], append=True)
     df.ta.macd(fast=params['macd_fast'], slow=params['macd_slow'], signal=params['macd_signal'], append=True)
     df.ta.rsi(length=params['rsi_period'], append=True)
-
-    # Robustly find column names
+    
     macd_col = find_col(df.columns, f"MACD_{params['macd_fast']}_{params['macd_slow']}_{params['macd_signal']}")
     macds_col = find_col(df.columns, f"MACDs_{params['macd_fast']}_{params['macd_slow']}_{params['macd_signal']}")
     bbu_col = find_col(df.columns, f"BBU_{params['bbands_period']}_")
@@ -164,15 +167,17 @@ def analyze_momentum_breakout(df, params):
     
     last, prev = df.iloc[-2], df.iloc[-3]
     
+    # [IMPROVEMENT] Use both volume spike and RVOL for confirmation
     volume_ok = last['volume'] > (df['volume'].rolling(20).mean().iloc[-2] * params['volume_spike_multiplier'])
+    rvol_ok = rvol >= bot_data['settings']['liquidity_filters']['min_rvol']
     
     if (prev[macd_col] <= prev[macds_col] and last[macd_col] > last[macds_col] and
         last['close'] > last[bbu_col] and last['close'] > last["VWAP_D"] and
-        last[rsi_col] < params['rsi_max_level'] and volume_ok):
-            return {"reason": "Momentum Breakout (Vol Cnf)", "type": "long"}
+        last[rsi_col] < params['rsi_max_level'] and volume_ok and rvol_ok):
+            return {"reason": "Momentum Breakout (Vol+RVOL Cnf)", "type": "long"}
     return None
 
-def analyze_breakout_squeeze_pro(df, params):
+def analyze_breakout_squeeze_pro(df, params, rvol):
     df.ta.bbands(length=params['bbands_period'], std=params['bbands_stddev'], append=True)
     df.ta.kc(length=params['keltner_period'], scalar=params['keltner_atr_multiplier'], append=True)
     df.ta.obv(append=True)
@@ -185,16 +190,17 @@ def analyze_breakout_squeeze_pro(df, params):
     if not all([bbu_col, bbl_col, kcu_col, kcl_col]): return None
 
     last, prev = df.iloc[-2], df.iloc[-3]
-
     is_in_squeeze = prev[bbl_col] > prev[kcl_col] and prev[bbu_col] < prev[kcu_col]
     
     if is_in_squeeze:
         breakout_fired = last['close'] > last[bbu_col]
+        # [IMPROVEMENT] Use both volume spike and RVOL for confirmation
         volume_ok = not params['volume_confirmation_enabled'] or last['volume'] > df['volume'].rolling(20).mean().iloc[-2] * 1.5
+        rvol_ok = rvol >= bot_data['settings']['liquidity_filters']['min_rvol']
         obv_rising = df['OBV'].iloc[-2] > df['OBV'].iloc[-3]
         
-        if breakout_fired and volume_ok and obv_rising:
-            return {"reason": "Keltner/BB Squeeze Breakout", "type": "long"}
+        if breakout_fired and volume_ok and rvol_ok and obv_rising:
+            return {"reason": "Keltner/BB Squeeze Breakout (RVOL)", "type": "long"}
     return None
 
 def find_divergence_points(series, lookback):
@@ -231,24 +237,35 @@ def analyze_rsi_divergence(df, params):
                 return {"reason": "Bullish RSI Divergence (Cnf)", "type": "long"}
     return None
 
-def analyze_supertrend_pullback(df, params):
+def analyze_supertrend_pullback(df, params, rvol, adx_value):
     df.ta.supertrend(length=params['atr_period'], multiplier=params['atr_multiplier'], append=True)
-
     st_dir_col = find_col(df.columns, f"SUPERTd_{params['atr_period']}_")
-    if not st_dir_col: return None
+    ema_col = find_col(df.columns, 'EMA_') # Assumes EMA is calculated in worker
+    if not st_dir_col or not ema_col: return None
     
     last, prev = df.iloc[-2], df.iloc[-3]
-    
     st_flipped_bullish = prev[st_dir_col] == -1 and last[st_dir_col] == 1
 
     if st_flipped_bullish:
-        return {"reason": "Supertrend Flip to Bullish", "type": "long"}
+        # [IMPROVEMENT] Stricter conditions for Supertrend signal
+        settings = bot_data['settings']
+        ema_ok = last['close'] > last[ema_col]
+        adx_ok = adx_value >= settings['master_adx_filter_level']
+        rvol_ok = rvol >= settings['liquidity_filters']['min_rvol']
+        
+        # Confirmation by breaking a recent swing high
+        lookback_period = params.get('swing_high_lookback', 10)
+        recent_swing_high = df['high'].iloc[-lookback_period:-2].max()
+        breakout_ok = last['close'] > recent_swing_high
+        
+        if ema_ok and adx_ok and rvol_ok and breakout_ok:
+            return {"reason": "Supertrend Flip/Breakout (EMA/ADX/RVOL Cnf)", "type": "long"}
     return None
 
 SCANNERS = {
     "momentum_breakout": analyze_momentum_breakout,
     "breakout_squeeze_pro": analyze_breakout_squeeze_pro,
-    "rsi_divergence": analyze_rsi_divergence,
+    "rsi_divergence": analyze_rsi_divergence, # Note: RVOL not added here as it's a reversal strategy
     "supertrend_pullback": analyze_supertrend_pullback,
 }
 
@@ -272,11 +289,26 @@ async def aggregate_top_movers():
         except Exception: return []
     results = await asyncio.gather(*[fetch(ex_id, ex) for ex_id, ex in bot_data["exchanges"].items()])
     for res in results: all_tickers.extend(res)
-    usdt_tickers = [t for t in all_tickers if t.get('symbol') and t['symbol'].upper().endswith('/USDT') and not any(k in t['symbol'].upper() for k in ['UP','DOWN','3L','3S','BEAR','BULL'])]
-    sorted_tickers = sorted(usdt_tickers, key=lambda t: t.get('quoteVolume', 0) or 0, reverse=True)
+    
+    # [IMPROVEMENT] Pre-filter based on settings
+    settings = bot_data['settings']
+    excluded_bases = settings['stablecoin_filter']['exclude_bases']
+    min_volume = settings['liquidity_filters']['min_quote_volume_24h_usd']
+
+    usdt_tickers = [
+        t for t in all_tickers 
+        if t.get('symbol') 
+        and t['symbol'].upper().endswith('/USDT') 
+        and t['symbol'].split('/')[0] not in excluded_bases
+        and t.get('quoteVolume', 0) >= min_volume
+        and not any(k in t['symbol'].upper() for k in ['UP','DOWN','3L','3S','BEAR','BULL'])
+    ]
+    
+    sorted_tickers = sorted(usdt_tickers, key=lambda t: t.get('quoteVolume', 0), reverse=True)
     unique_symbols = {t['symbol']: {'exchange': t['exchange'], 'symbol': t['symbol']} for t in sorted_tickers}
-    final_list = list(unique_symbols.values())[:bot_data["settings"]['top_n_symbols_by_volume']]
-    logging.info(f"Aggregated markets. Found {len(all_tickers)} tickers, selected top {len(final_list)} unique pairs.")
+    final_list = list(unique_symbols.values())[:settings['top_n_symbols_by_volume']]
+    
+    logging.info(f"Aggregated markets. Found {len(all_tickers)} tickers -> Post-filter: {len(usdt_tickers)} -> Selected top {len(final_list)} unique pairs.")
     bot_data['status_snapshot']['markets_found'] = len(final_list)
     return final_list
 
@@ -296,12 +328,69 @@ async def worker(queue, results_list, settings, failure_counter):
     while not queue.empty():
         market_info = await queue.get()
         symbol = market_info.get('symbol', 'N/A')
+        exchange = bot_data["exchanges"].get(market_info['exchange'])
+        if not exchange or not settings.get('active_scanners'): 
+            queue.task_done()
+            continue
+        
         try:
-            exchange = bot_data["exchanges"].get(market_info['exchange'])
-            if not exchange or not settings.get('active_scanners'): continue
+            logging.info(f"--- Checking {symbol} on {exchange.id} ---")
             
-            logging.info(f"--- Checking {symbol} ---")
+            # --- [IMPROVEMENT] Pre-scan filters ---
+            liq_filters = settings['liquidity_filters']
+            vol_filters = settings['volatility_filters']
+            ema_filters = settings['ema_trend_filter']
 
+            # 1. Spread Filter
+            orderbook = await exchange.fetch_order_book(symbol, limit=1)
+            if not orderbook or not orderbook['bids'] or not orderbook['asks']:
+                logging.info(f"Reject {symbol}: Could not fetch order book.")
+                continue
+            best_bid, best_ask = orderbook['bids'][0][0], orderbook['asks'][0][0]
+            if best_bid <= 0 or best_ask <= 0:
+                logging.info(f"Reject {symbol}: Invalid bid/ask price.")
+                continue
+            spread_percent = ((best_ask - best_bid) / ((best_ask + best_bid) / 2)) * 100
+            if spread_percent > liq_filters['max_spread_percent']:
+                logging.info(f"Reject {symbol}: High Spread ({spread_percent:.2f}% > {liq_filters['max_spread_percent']}%)")
+                continue
+
+            # Fetch OHLCV for remaining filters
+            ohlcv = await exchange.fetch_ohlcv(symbol, TIMEFRAME, limit=200)
+            if len(ohlcv) < max(liq_filters['rvol_period'] + 5, ema_filters['ema_period']): 
+                logging.info(f"Skipping {symbol}: Not enough data ({len(ohlcv)} candles) for indicators.")
+                continue
+
+            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+            df.set_index('timestamp', inplace=True)
+            
+            # 2. RVOL Filter
+            df['volume_sma'] = ta.sma(df['volume'], length=liq_filters['rvol_period'])
+            rvol = df['volume'].iloc[-2] / df['volume_sma'].iloc[-2] if df['volume_sma'].iloc[-2] > 0 else 0
+            if rvol < liq_filters['min_rvol']:
+                logging.info(f"Reject {symbol}: Low RVOL ({rvol:.2f} < {liq_filters['min_rvol']})")
+                continue
+
+            # 3. ATR Volatility Filter
+            atr_col_name = f"ATRr_{vol_filters['atr_period_for_filter']}"
+            df.ta.atr(length=vol_filters['atr_period_for_filter'], append=True)
+            last_close = df['close'].iloc[-2]
+            last_atr = df[atr_col_name].iloc[-2]
+            atr_percent = (last_atr / last_close) * 100 if last_close > 0 else 0
+            if atr_percent < vol_filters['min_atr_percent']:
+                logging.info(f"Reject {symbol}: Low ATR% ({atr_percent:.2f}% < {vol_filters['min_atr_percent']}%)")
+                continue
+
+            # 4. EMA Trend Filter
+            if ema_filters['enabled']:
+                ema_col_name = f"EMA_{ema_filters['ema_period']}"
+                df.ta.ema(length=ema_filters['ema_period'], append=True)
+                if last_close < df[ema_col_name].iloc[-2]:
+                    logging.info(f"Reject {symbol}: Below EMA{ema_filters['ema_period']} ({last_close:.4f} < {df[ema_col_name].iloc[-2]:.4f})")
+                    continue
+            
+            # --- Optional Master Filters (as before) ---
             if settings.get('use_master_trend_filter'):
                 is_htf_bullish, reason = await get_higher_timeframe_trend(exchange, symbol, settings['master_trend_filter_ma_period'])
                 if is_htf_bullish == False:
@@ -309,46 +398,51 @@ async def worker(queue, results_list, settings, failure_counter):
                     continue
                 logging.info(f"HTF Trend Filter: PASSED ({reason}) for {symbol}")
 
-            ohlcv = await exchange.fetch_ohlcv(symbol, TIMEFRAME, limit=200)
-            if len(ohlcv) < 100: 
-                logging.info(f"Skipping {symbol}: Not enough data ({len(ohlcv)} candles)")
-                continue
-
-            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']); 
-            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms'); 
-            df.set_index('timestamp', inplace=True)
-            
             df.ta.adx(append=True)
-            df.ta.atr(length=settings['atr_period'], append=True)
-
+            adx_col = find_col(df.columns, 'ADX_')
+            adx_value = df[adx_col].iloc[-2] if adx_col and adx_col in df.columns else float('nan')
             if settings.get('use_master_trend_filter'):
-                # [FIX] Handle cases where ADX is NaN, which can happen with illiquid pairs.
-                # A NaN value should be treated as a failed filter.
-                adx_col = find_col(df.columns, 'ADX_')
-                adx_value = df[adx_col].iloc[-2] if adx_col and adx_col in df.columns else float('nan')
-                
                 if pd.isna(adx_value) or adx_value < settings['master_adx_filter_level']:
                     reason = "is NaN" if pd.isna(adx_value) else f"is {adx_value:.2f}, below {settings['master_adx_filter_level']}"
                     logging.info(f"ADX Filter: FAILED (ADX {reason}) for {symbol}")
                     continue
                 logging.info(f"ADX Filter: PASSED (ADX is {adx_value:.2f}) for {symbol}")
 
+            # --- Run Scanners ---
             for scanner_name in settings['active_scanners']:
                 analysis_df = df.copy()
-                analysis_result = SCANNERS.get(scanner_name)(analysis_df, settings.get(scanner_name, {}))
+                scanner_func = SCANNERS.get(scanner_name)
+                
+                # Pass extra data to relevant scanners
+                scanner_args = {'df': analysis_df, 'params': settings.get(scanner_name, {})}
+                if scanner_name in ["momentum_breakout", "breakout_squeeze_pro", "supertrend_pullback"]:
+                    scanner_args['rvol'] = rvol
+                if scanner_name == "supertrend_pullback":
+                    scanner_args['adx_value'] = adx_value
+
+                analysis_result = scanner_func(**scanner_args)
                 
                 if analysis_result and analysis_result.get("type") == "long":
-                    logging.info(f"SIGNAL FOUND for {symbol} via {scanner_name}")
                     entry_price = df.iloc[-2]['close']
                     current_atr_col = find_col(df.columns, f"ATRr_{settings['atr_period']}")
-                    if not current_atr_col: continue # Should not happen as it's calculated before
-                    current_atr = df.iloc[-2].get(current_atr_col, 0)
+                    if not current_atr_col: df.ta.atr(length=settings['atr_period'], append=True)
+                    current_atr = df.iloc[-2].get(find_col(df.columns, f"ATRr_{settings['atr_period']}"), 0)
                     
                     if settings.get("use_dynamic_risk_management", False) and current_atr > 0 and not pd.isna(current_atr):
                         risk_per_unit = current_atr * settings['atr_sl_multiplier']
                         stop_loss, take_profit = entry_price - risk_per_unit, entry_price + (risk_per_unit * settings['risk_reward_ratio'])
                     else:
                         stop_loss, take_profit = entry_price * (1 - settings['stop_loss_percentage'] / 100), entry_price * (1 + settings['take_profit_percentage'] / 100)
+
+                    # --- [IMPROVEMENT] Final TP/SL size filter ---
+                    min_filters = settings['min_tp_sl_filter']
+                    tp_percent = ((take_profit - entry_price) / entry_price * 100)
+                    sl_percent = ((entry_price - stop_loss) / entry_price * 100)
+                    if tp_percent < min_filters['min_tp_percent'] or sl_percent < min_filters['min_sl_percent']:
+                        logging.info(f"Reject {symbol} Signal: Small TP/SL (TP: {tp_percent:.2f}%, SL: {sl_percent:.2f}%)")
+                        continue
+
+                    logging.info(f"SIGNAL FOUND for {symbol} via {scanner_name}")
                     signal = {"symbol": symbol, "exchange": market_info['exchange'].capitalize(), "entry_price": entry_price, "take_profit": take_profit, "stop_loss": stop_loss, "timestamp": df.index[-2], "reason": analysis_result['reason']}
                     results_list.append(signal)
                     break 
@@ -381,7 +475,7 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
     worker_tasks = [asyncio.create_task(worker(queue, signals, settings, failure_counter)) for _ in range(settings['concurrent_workers'])]
     await queue.join(); [task.cancel() for task in worker_tasks]
     
-    total_signals = len(signals) # عد كل الإشارات الأولية التي تم العثور عليها
+    total_signals = len(signals)
     new_trades, opportunities = 0, 0
     last_signal_time = bot_data['last_signal_time']
     for signal in signals:
@@ -524,7 +618,7 @@ async def check_market_regime():
 # --- أوامر ولوحات مفاتيح تليجرام --- #
 main_menu_keyboard = [["📊 الإحصائيات", "📈 الصفقات النشطة"], ["⚙️ الإعدادات", "👀 ماذا يجري في الخلفية؟"], ["ℹ️ مساعدة", "🔬 فحص يدوي الآن"]]
 settings_menu_keyboard = [["🎭 تفعيل/تعطيل الماسحات"], ["🔧 تعديل المعايير", "🔙 القائمة الرئيسية"]]
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("أهلاً بك في محاكي التداول المتقدم! (v18)", reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True))
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("أهلاً بك في محاكي التداول المتقدم! (v20 - Enhanced Filters)", reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True))
 async def scan_now_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if bot_data['status_snapshot'].get('scan_in_progress', False): await update.message.reply_text("⚠️ فحص آخر قيد التنفيذ حالياً."); return
     await update.message.reply_text("⏳ جاري بدء الفحص اليدوي...")
@@ -552,7 +646,7 @@ async def toggle_scanner_callback(update: Update, context: ContextTypes.DEFAULT_
         if "Message is not modified" not in str(e): raise
 async def show_set_parameter_instructions(update: Update, context: ContextTypes.DEFAULT_TYPE):
     params_list = "\n".join([f"`{k}`" for k, v in bot_data["settings"].items() if not isinstance(v, (dict, list))])
-    message = (f"لتعديل معيار، أرسل:\n`اسم_المعيار = قيمة_جديدة`\n\n*المعايير القابلة للتعديل:*\n{params_list}")
+    message = (f"لتعديل معيار، أرسل:\n`اسم_المعيار = قيمة_جديدة`\n\n*المعايير القابلة للتعديل:*\n{params_list}\n\n(لتعديل المعايير المتداخلة مثل `min_rvol`، تواصل مع المطور).")
     await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN, reply_markup=ReplyKeyboardMarkup([["🔙 قائمة الإعدادات"]], resize_keyboard=True))
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("*مساعدة البوت*\n`/start` - بدء\n`/scan` - فحص يدوي\n`/report` - تقرير يومي\n`/check <ID>` - متابعة صفقة\n`/debug` - فحص الحالة", parse_mode=ParseMode.MARKDOWN)
@@ -697,11 +791,11 @@ async def post_init(application: Application):
         report_time = dt_time(hour=23, minute=55, tzinfo=EGYPT_TZ)
         application.job_queue.run_daily(send_daily_report, time=report_time, name='daily_report')
         logging.info(f"Daily report scheduled for {report_time.strftime('%H:%M:%S')} {EGYPT_TZ}.")
-    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *محاكي التداول المتقدم (v18 - STABLE) جاهز للعمل!*", parse_mode=ParseMode.MARKDOWN)
+    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *محاكي التداول المتقدم (v20 - Enhanced Filters) جاهز للعمل!*", parse_mode=ParseMode.MARKDOWN)
     logging.info("Post-init finished.")
 async def post_shutdown(application: Application): await asyncio.gather(*[ex.close() for ex in bot_data["exchanges"].values()]); logging.info("Connections closed.")
 def main():
-    print("🚀 Starting Pro Trading Simulator Bot (v18 - STABLE)...")
+    print("🚀 Starting Pro Trading Simulator Bot (v20 - Enhanced Filters)...")
     load_settings(); init_database()
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).post_shutdown(post_shutdown).build()
     application.add_handler(CommandHandler("start", start_command)); application.add_handler(CommandHandler("scan", scan_now_command))
@@ -713,4 +807,3 @@ def main():
 if __name__ == '__main__':
     try: main()
     except Exception as e: logging.critical(f"Bot stopped due to a critical error: {e}", exc_info=True)
-
