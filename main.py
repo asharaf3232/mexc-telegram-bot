@@ -67,17 +67,13 @@ bot_data = {"exchanges": {}, "last_signal_time": {}, "settings": {}, "status_sna
 # --- إدارة الإعدادات --- #
 DEFAULT_SETTINGS = {
     "virtual_portfolio_balance_usdt": 1000.0, "virtual_trade_size_percentage": 5.0, "max_concurrent_trades": 5, "top_n_symbols_by_volume": 250, "concurrent_workers": 10, "market_regime_filter_enabled": True,
-    # [ENHANCEMENT] Added new scanners and master filters
     "active_scanners": ["momentum_breakout", "breakout_squeeze_pro", "rsi_divergence", "supertrend_pullback"],
     "use_master_trend_filter": True, "master_trend_filter_ma_period": 50, "master_adx_filter_level": 22,
     "use_dynamic_risk_management": True, "atr_period": 14, "atr_sl_multiplier": 2.0, "risk_reward_ratio": 1.5,
     "take_profit_percentage": 4.0, "stop_loss_percentage": 2.0, "trailing_sl_enabled": True, "trailing_sl_activate_percent": 2.0, "trailing_sl_percent": 1.5,
     "momentum_breakout": {"vwap_period": 14, "macd_fast": 12, "macd_slow": 26, "macd_signal": 9, "bbands_period": 20, "bbands_stddev": 2.0, "rsi_period": 14, "rsi_max_level": 68, "volume_spike_multiplier": 1.5},
-    "mean_reversion": {"bbands_period": 20, "bbands_stddev": 2.0, "rsi_period": 14, "rsi_oversold_level": 30},
-    # [ENHANCEMENT] Pro Squeeze scanner with Keltner Channels
     "breakout_squeeze_pro": {"bbands_period": 20, "bbands_stddev": 2.0, "keltner_period": 20, "keltner_atr_multiplier": 1.5, "volume_confirmation_enabled": True},
     "rsi_divergence": {"rsi_period": 14, "lookback_period": 35, "peak_trough_lookback": 5, "confirm_with_rsi_exit": True},
-    # [ENHANCEMENT] New Supertrend scanner
     "supertrend_pullback": {"atr_period": 10, "atr_multiplier": 3.0}
 }
 
@@ -91,9 +87,17 @@ def load_settings():
                 if key not in bot_data["settings"]:
                     bot_data["settings"][key] = value; updated = True
                 elif isinstance(value, dict):
-                     for sub_key, sub_value in value.items():
-                         if sub_key not in bot_data["settings"].get(key, {}):
-                             bot_data["settings"][key][sub_key] = sub_value; updated = True
+                    for sub_key, sub_value in value.items():
+                        if sub_key not in bot_data["settings"].get(key, {}):
+                            bot_data["settings"][key][sub_key] = sub_value; updated = True
+            
+            # [FIX] Automatically remove obsolete settings keys
+            keys_to_remove = [key for key in bot_data["settings"] if key not in DEFAULT_SETTINGS]
+            if keys_to_remove:
+                logging.info(f"Removing obsolete settings keys: {keys_to_remove}")
+                for key in keys_to_remove: del bot_data["settings"][key]
+                updated = True
+
             if updated: save_settings()
         else:
             bot_data["settings"] = DEFAULT_SETTINGS
@@ -143,40 +147,43 @@ def analyze_momentum_breakout(df, params):
     try:
         macd_col = f"MACD_{params['macd_fast']}_{params['macd_slow']}_{params['macd_signal']}"
         macds_col = f"MACDs_{params['macd_fast']}_{params['macd_slow']}_{params['macd_signal']}"
-        bbu_col = f"BBU_{params['bbands_period']}_{params['bbands_stddev']}"
+        bbu_col = f"BBU_{params['bbands_period']}_{params['bbands_stddev']:.1f}"
         rsi_col = f"RSI_{params['rsi_period']}"
         
         last, prev = df.iloc[-2], df.iloc[-3]
         
-        volume_ok = last['volume'] > (prev['volume'] * params['volume_spike_multiplier'])
+        volume_ok = last['volume'] > (df['volume'].rolling(20).mean().iloc[-2] * params['volume_spike_multiplier'])
         
         if (prev[macd_col] <= prev[macds_col] and last[macd_col] > last[macds_col] and
             last['close'] > last[bbu_col] and last['close'] > last["VWAP_D"] and
             last[rsi_col] < params['rsi_max_level'] and volume_ok):
              return {"reason": "Momentum Breakout (Vol Cnf)", "type": "long"}
+    except KeyError as e:
+        logging.warning(f"KeyError in momentum_breakout analysis: {e}")
     except Exception: return None
     return None
 
 def analyze_breakout_squeeze_pro(df, params):
     try:
-        bbu_col = f"BBU_{params['bbands_period']}_{params['bbands_stddev']}"
-        bbl_col = f"BBL_{params['bbands_period']}_{params['bbands_stddev']}"
-        kcu_col = f"KCUe_{params['keltner_period']}_{params['keltner_atr_multiplier']}"
-        kcl_col = f"KCUe_{params['keltner_period']}_{params['keltner_atr_multiplier']}"
+        bbu_col = f"BBU_{params['bbands_period']}_{params['bbands_stddev']:.1f}"
+        bbl_col = f"BBL_{params['bbands_period']}_{params['bbands_stddev']:.1f}"
+        kcu_col = f"KCUe_{params['keltner_period']}_{params['keltner_atr_multiplier']:.1f}"
+        # [BUG FIX] Corrected the column name for Keltner Channel Lower band
+        kcl_col = f"KCLEe_{params['keltner_period']}_{params['keltner_atr_multiplier']:.1f}"
 
         last, prev = df.iloc[-2], df.iloc[-3]
 
-        # Squeeze condition: Bollinger Bands are inside Keltner Channels
         is_in_squeeze = prev[bbl_col] > prev[kcl_col] and prev[bbu_col] < prev[kcu_col]
         
         if is_in_squeeze:
-            # Breakout condition: price closes above upper Bollinger Band
             breakout_fired = last['close'] > last[bbu_col]
             volume_ok = not params['volume_confirmation_enabled'] or last['volume'] > df['volume'].rolling(20).mean().iloc[-2] * 1.5
             obv_rising = df['OBV'].iloc[-2] > df['OBV'].iloc[-3]
             
             if breakout_fired and volume_ok and obv_rising:
                 return {"reason": "Keltner/BB Squeeze Breakout", "type": "long"}
+    except KeyError as e:
+        logging.warning(f"KeyError in breakout_squeeze_pro analysis: {e}")
     except Exception: return None
     return None
 
@@ -200,35 +207,35 @@ def analyze_rsi_divergence(df, params):
             p_low1_idx, p_low2_idx = price_troughs_idx[-2], price_troughs_idx[-1]
             r_low1_idx, r_low2_idx = rsi_troughs_idx[-2], rsi_troughs_idx[-1]
             
-            # Classic Bullish Divergence Condition
             is_divergence = (subset.iloc[p_low2_idx]['low'] < subset.iloc[p_low1_idx]['low'] and 
                              subset.iloc[r_low2_idx][rsi_col] > subset.iloc[r_low1_idx][rsi_col])
             
             if is_divergence:
-                # Confirmation: RSI exits oversold zone
                 rsi_exits_oversold = (subset.iloc[r_low1_idx][rsi_col] < 35 and 
                                       subset.iloc[-2][rsi_col] > 40)
-                
-                # Confirmation: Price breaks a recent swing high for confirmation
                 confirmation_price = subset.iloc[p_low2_idx:]['high'].max()
                 price_confirmed = df.iloc[-2]['close'] > confirmation_price
 
                 if (not params['confirm_with_rsi_exit'] or rsi_exits_oversold) and price_confirmed:
                     return {"reason": "Bullish RSI Divergence (Cnf)", "type": "long"}
+    except KeyError as e:
+        logging.warning(f"KeyError in rsi_divergence analysis: {e}")
     except Exception as e:
         logging.warning(f"RSI Divergence analysis failed: {e}")
     return None
 
 def analyze_supertrend_pullback(df, params):
     try:
-        st_col = f"SUPERT_{params['atr_period']}_{params['atr_multiplier']}"
+        # [BUG FIX] Use the correct direction column 'SUPERTd'
+        st_dir_col = f"SUPERTd_{params['atr_period']}_{params['atr_multiplier']:.1f}"
         last, prev = df.iloc[-2], df.iloc[-3]
         
-        # Condition: Supertrend flips from bearish to bullish
-        st_flipped_bullish = pd.isna(prev[st_col]) and not pd.isna(last[st_col]) and last[st_col] < last['close']
+        st_flipped_bullish = prev[st_dir_col] == -1 and last[st_dir_col] == 1
 
         if st_flipped_bullish:
             return {"reason": "Supertrend Flip to Bullish", "type": "long"}
+    except KeyError as e:
+        logging.warning(f"KeyError in supertrend_pullback analysis: {e}")
     except Exception: return None
     return None
 
@@ -270,34 +277,38 @@ async def aggregate_top_movers():
 async def get_higher_timeframe_trend(exchange, symbol, ma_period):
     try:
         ohlcv_htf = await exchange.fetch_ohlcv(symbol, HIGHER_TIMEFRAME, limit=ma_period + 5)
-        if len(ohlcv_htf) < ma_period: return None # Not enough data
+        if len(ohlcv_htf) < ma_period: return None, "Not enough HTF data"
         df_htf = pd.DataFrame(ohlcv_htf, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df_htf[f'SMA_{ma_period}'] = ta.sma(df_htf['close'], length=ma_period)
         last_candle = df_htf.iloc[-1]
         is_bullish = last_candle['close'] > last_candle[f'SMA_{ma_period}']
-        return is_bullish
+        return is_bullish, "Bullish" if is_bullish else "Bearish"
     except Exception as e:
         logging.warning(f"Could not fetch HTF trend for {symbol}: {e}")
-        return None # In case of error, don't block trading
+        return None, f"Error: {e}"
 
-async def worker(queue, results_list, settings):
+async def worker(queue, results_list, settings, failure_counter):
     while not queue.empty():
+        market_info = await queue.get()
+        symbol = market_info.get('symbol', 'N/A')
         try:
-            market_info = await queue.get()
             exchange = bot_data["exchanges"].get(market_info['exchange'])
             if not exchange or not settings.get('active_scanners'): continue
+            
+            logging.info(f"--- Checking {symbol} ---")
 
             if settings.get('use_master_trend_filter'):
-                is_htf_bullish = await get_higher_timeframe_trend(exchange, market_info['symbol'], settings['master_trend_filter_ma_period'])
-                if is_htf_bullish == False: # Strict check for False, allow trading on None (error)
-                    queue.task_done(); continue
+                is_htf_bullish, reason = await get_higher_timeframe_trend(exchange, symbol, settings['master_trend_filter_ma_period'])
+                if is_htf_bullish == False:
+                    logging.info(f"HTF Trend Filter: FAILED ({reason}) for {symbol}")
+                    continue
+                logging.info(f"HTF Trend Filter: PASSED ({reason}) for {symbol}")
 
-            ohlcv = await exchange.fetch_ohlcv(market_info['symbol'], TIMEFRAME, limit=200)
-            if len(ohlcv) < 100: queue.task_done(); continue
-            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms'); df.set_index('timestamp', inplace=True)
+            ohlcv = await exchange.fetch_ohlcv(symbol, TIMEFRAME, limit=200)
+            if len(ohlcv) < 100: logging.info(f"Skipping {symbol}: Not enough data ({len(ohlcv)} candles)"); continue
+            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']); df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms'); df.set_index('timestamp', inplace=True)
             
-            # --- Pre-calculate all potential indicators for efficiency ---
+            # Pre-calculate all potential indicators
             df.ta.adx(append=True)
             df.ta.atr(length=settings['atr_period'], append=True)
             df.ta.obv(append=True)
@@ -308,29 +319,31 @@ async def worker(queue, results_list, settings):
             df.ta.kc(length=settings['breakout_squeeze_pro']['keltner_period'], scalar=settings['breakout_squeeze_pro']['keltner_atr_multiplier'], append=True)
             df.ta.supertrend(length=settings['supertrend_pullback']['atr_period'], multiplier=settings['supertrend_pullback']['atr_multiplier'], append=True)
             
-            # --- Master ADX Filter ---
             if settings.get('use_master_trend_filter'):
-                if df[f'ADX_14'].iloc[-2] < settings['master_adx_filter_level']:
-                    queue.task_done(); continue
+                adx_value = df[f'ADX_14'].iloc[-2]
+                if adx_value < settings['master_adx_filter_level']:
+                    logging.info(f"ADX Filter: FAILED (ADX is {adx_value:.2f}, below {settings['master_adx_filter_level']}) for {symbol}")
+                    continue
+                logging.info(f"ADX Filter: PASSED (ADX is {adx_value:.2f}) for {symbol}")
 
             for scanner_name in settings['active_scanners']:
-                analysis_result = SCANNERS.get(scanner_name, lambda d, p: None)(df, settings.get(scanner_name, {}))
+                analysis_result = SCANNERS.get(scanner_name)(df, settings.get(scanner_name, {}))
                 if analysis_result and analysis_result.get("type") == "long":
+                    logging.info(f"SIGNAL FOUND for {symbol} via {scanner_name}")
                     entry_price = df.iloc[-2]['close']
                     current_atr = df.iloc[-2].get(f"ATRr_{settings['atr_period']}", 0)
                     if settings.get("use_dynamic_risk_management", False) and current_atr > 0 and not pd.isna(current_atr):
                         risk_per_unit = current_atr * settings['atr_sl_multiplier']
-                        stop_loss = entry_price - risk_per_unit
-                        take_profit = entry_price + (risk_per_unit * settings['risk_reward_ratio'])
+                        stop_loss, take_profit = entry_price - risk_per_unit, entry_price + (risk_per_unit * settings['risk_reward_ratio'])
                     else:
-                        stop_loss = entry_price * (1 - settings['stop_loss_percentage'] / 100)
-                        take_profit = entry_price * (1 + settings['take_profit_percentage'] / 100)
-                    signal = {"symbol": market_info['symbol'], "exchange": market_info['exchange'].capitalize(), "entry_price": entry_price, "take_profit": take_profit, "stop_loss": stop_loss, "timestamp": df.index[-2], "reason": analysis_result['reason']}
+                        stop_loss, take_profit = entry_price * (1 - settings['stop_loss_percentage'] / 100), entry_price * (1 + settings['take_profit_percentage'] / 100)
+                    signal = {"symbol": symbol, "exchange": market_info['exchange'].capitalize(), "entry_price": entry_price, "take_profit": take_profit, "stop_loss": stop_loss, "timestamp": df.index[-2], "reason": analysis_result['reason']}
                     results_list.append(signal)
-                    break
-            queue.task_done()
+                    break 
         except Exception as e: 
-            logging.error(f"Error in worker for {market_info.get('symbol', 'N/A')}: {e}", exc_info=True)
+            logging.error(f"CRITICAL ERROR in worker for {symbol}: {e}", exc_info=True)
+            failure_counter[0] += 1
+        finally:
             queue.task_done()
 
 async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
@@ -338,57 +351,62 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
     status.update({"scan_in_progress": True, "last_scan_start_time": datetime.now(EGYPT_TZ).strftime('%Y-%m-%d %H:%M:%S'), "signals_found": 0})
     settings = bot_data["settings"]
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=10)
-        cursor = conn.cursor()
+        conn = sqlite3.connect(DB_FILE, timeout=10); cursor = conn.cursor()
         cursor.execute("SELECT COUNT(*) FROM trades WHERE status = 'نشطة'")
-        active_trades_count = cursor.fetchone()[0]
-        conn.close()
+        active_trades_count = cursor.fetchone()[0]; conn.close()
     except Exception as e:
-        logging.error(f"DB Error in perform_scan: {e}")
-        active_trades_count = settings.get("max_concurrent_trades", 5)
+        logging.error(f"DB Error in perform_scan: {e}"); active_trades_count = settings.get("max_concurrent_trades", 5)
+    
     if settings.get('market_regime_filter_enabled', True) and not await check_market_regime():
         logging.info("Skipping scan: Bearish market regime detected."); status['scan_in_progress'] = False; return
+    
     top_markets = await aggregate_top_movers()
     if not top_markets:
-        logging.info("Scan complete: No markets to scan.")
-        status['scan_in_progress'] = False; return
+        logging.info("Scan complete: No markets to scan."); status['scan_in_progress'] = False; return
+    
     queue = asyncio.Queue(); [await queue.put(market) for market in top_markets]
-    signals = []; worker_tasks = [asyncio.create_task(worker(queue, signals, settings)) for _ in range(settings['concurrent_workers'])]
+    signals, failure_counter = [], [0] # Use a list to make it mutable
+    worker_tasks = [asyncio.create_task(worker(queue, signals, settings, failure_counter)) for _ in range(settings['concurrent_workers'])]
     await queue.join(); [task.cancel() for task in worker_tasks]
-    total_signals_found_this_run, new_trades_entered, opportunities_identified = 0, 0, 0
+    
+    total_signals, new_trades, opportunities = 0, 0, 0
     last_signal_time = bot_data['last_signal_time']
     for signal in signals:
-        symbol = signal['symbol']; current_time = time.time()
-        if symbol in last_signal_time and (current_time - last_signal_time.get(symbol, 0)) <= (SCAN_INTERVAL_SECONDS * 4): continue
-        total_signals_found_this_run += 1
+        if signal['symbol'] in last_signal_time and (time.time() - last_signal_time.get(signal['symbol'], 0)) <= (SCAN_INTERVAL_SECONDS * 4): continue
+        total_signals += 1
         trade_amount_usdt = settings["virtual_portfolio_balance_usdt"] * (settings["virtual_trade_size_percentage"] / 100)
         signal.update({'quantity': trade_amount_usdt / signal['entry_price'], 'entry_value_usdt': trade_amount_usdt})
+        
         if active_trades_count < settings.get("max_concurrent_trades", 5):
             trade_id = log_recommendation_to_db(signal)
             if trade_id:
                 signal['trade_id'] = trade_id
                 await send_telegram_message(context.bot, signal, is_new=True)
-                active_trades_count += 1; new_trades_entered += 1
+                active_trades_count += 1; new_trades += 1
         else:
             await send_telegram_message(context.bot, signal, is_opportunity=True)
-            opportunities_identified += 1
+            opportunities += 1
         await asyncio.sleep(0.5)
-        last_signal_time[symbol] = current_time
-    summary_log = f"Scan complete. Found: {total_signals_found_this_run}, Entered: {new_trades_entered}, Opportunities: {opportunities_identified}."
-    logging.info(summary_log)
-    if total_signals_found_this_run > 0:
+        last_signal_time[signal['symbol']] = time.time()
+
+    failures = failure_counter[0]
+    logging.info(f"Scan complete. Found: {total_signals}, Entered: {new_trades}, Opportunities: {opportunities}, Failures: {failures}.")
+    
+    if total_signals > 0 or failures > 0:
         summary_message = (f"🔹 *ملخص الفحص* 🔹\n\n"
-                           f"▫️ إجمالي الإشارات التي تم العثور عليها: *{total_signals_found_this_run}*\n"
-                           f"✅ صفقات جديدة تم الدخول بها: *{new_trades_entered}*\n"
-                           f"💡 فرص إضافية تم تحديدها: *{opportunities_identified}*")
+                           f"▫️ إجمالي الإشارات: *{total_signals}*\n"
+                           f"✅ صفقات جديدة: *{new_trades}*\n"
+                           f"💡 فرص إضافية: *{opportunities}*\n"
+                           f"⚠️ عملات فشل تحليلها: *{failures}*")
         await send_telegram_message(context.bot, {'custom_message': summary_message, 'target_chat': TELEGRAM_CHAT_ID})
-    status['signals_found'] = new_trades_entered + opportunities_identified
+        
+    status['signals_found'] = new_trades + opportunities
     status['last_scan_end_time'] = datetime.now(EGYPT_TZ).strftime('%Y-%m-%d %H:%M:%S'); status['scan_in_progress'] = False
 
-# [REFACTOR] A single, robust function to send all messages with retry logic.
 async def send_telegram_message(bot, signal_data, is_new=False, is_opportunity=False, status_update=None, update_type=None):
-    message = ""; keyboard = None; target_chat = TELEGRAM_CHAT_ID
+    message, keyboard, target_chat = "", None, TELEGRAM_CHAT_ID
     def format_price(price): return f"{price:,.8f}" if price < 0.01 else f"{price:,.4f}"
+    
     if 'custom_message' in signal_data:
         message, target_chat = signal_data['custom_message'], signal_data['target_chat']
     elif is_new or is_opportunity:
@@ -413,6 +431,7 @@ async def send_telegram_message(bot, signal_data, is_new=False, is_opportunity=F
         message = f"{icon} *{title}* {icon}\n\n*العملة:* `{signal_data['symbol']}` | *المنصة:* `{signal_data['exchange']}`\n*{pnl_label}:* `~${abs(signal_data.get('pnl_usdt', 0)):.2f} ({pnl_percent:+.2f}%)`"
     elif update_type == 'tsl_activation':
         message = f"🔒 *تأمين أرباح* 🔒\n\n*العملة:* `{signal_data['symbol']}`\nتم نقل وقف الخسارة إلى `${format_price(signal_data['stop_loss'])}`."
+    
     if not message: return
     for attempt in range(3):
         try:
@@ -430,6 +449,7 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
     except Exception as e: logging.error(f"DB error in track_open_trades: {e}"); return
     bot_data['status_snapshot']['active_trades_count'] = len(active_trades)
     if not active_trades: return
+
     async def check_trade(trade):
         exchange = bot_data["exchanges"].get(trade['exchange'].lower())
         if not exchange: return None
@@ -450,8 +470,9 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
                     elif highest_price > trade.get('highest_price', 0): return {'id': trade['id'], 'status': 'update_peak', 'highest_price': highest_price}
         except Exception: pass
         return None
+
     results = await asyncio.gather(*[check_trade(trade) for trade in active_trades])
-    updates_to_db = []; portfolio_pnl = 0.0
+    updates_to_db, portfolio_pnl = [], 0.0
     for result in filter(None, results):
         original_trade = next((t for t in active_trades if t['id'] == result['id']), None)
         if not original_trade: continue
@@ -466,6 +487,7 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
             await send_telegram_message(context.bot, {**original_trade, **result}, update_type='tsl_activation')
         elif status == 'update_sl': updates_to_db.append(("UPDATE trades SET stop_loss=?, highest_price=? WHERE id=?", (result['new_sl'], result['highest_price'], result['id'])))
         elif status == 'update_peak': updates_to_db.append(("UPDATE trades SET highest_price=? WHERE id=?", (result['highest_price'], result['id'])))
+    
     if updates_to_db:
         try:
             conn = sqlite3.connect(DB_FILE, timeout=10); cursor = conn.cursor()
@@ -660,11 +682,11 @@ async def post_init(application: Application):
         report_time = dt_time(hour=23, minute=55, tzinfo=EGYPT_TZ)
         application.job_queue.run_daily(send_daily_report, time=report_time, name='daily_report')
         logging.info(f"Daily report scheduled for {report_time.strftime('%H:%M:%S')} {EGYPT_TZ}.")
-    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *محاكي التداول المتقدم (v14) جاهز للعمل!*", parse_mode=ParseMode.MARKDOWN)
+    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *محاكي التداول المتقدم (v14 - STABLE) جاهز للعمل!*", parse_mode=ParseMode.MARKDOWN)
     logging.info("Post-init finished.")
 async def post_shutdown(application: Application): await asyncio.gather(*[ex.close() for ex in bot_data["exchanges"].values()]); logging.info("Connections closed.")
 def main():
-    print("🚀 Starting Pro Trading Simulator Bot (v14)...")
+    print("🚀 Starting Pro Trading Simulator Bot (v14 - STABLE)...")
     load_settings(); init_database()
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).post_shutdown(post_shutdown).build()
     application.add_handler(CommandHandler("start", start_command)); application.add_handler(CommandHandler("scan", scan_now_command))
@@ -676,4 +698,5 @@ def main():
 if __name__ == '__main__':
     try: main()
     except Exception as e: logging.critical(f"Bot stopped due to a critical error: {e}", exc_info=True)
+
 
