@@ -30,7 +30,6 @@ except ImportError:
 # --- الإعدادات الأساسية --- #
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', 'YOUR_BOT_TOKEN_HERE')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID', 'YOUR_CHAT_ID_HERE')
-# [FEATURE] Add a separate channel for signals. Fallback to the main chat ID if not set.
 TELEGRAM_SIGNAL_CHANNEL_ID = os.getenv('TELEGRAM_SIGNAL_CHANNEL_ID', TELEGRAM_CHAT_ID)
 
 
@@ -45,17 +44,16 @@ HIGHER_TIMEFRAME = '1h' # الإطار الزمني الأعلى للفلترة
 SCAN_INTERVAL_SECONDS = 900
 TRACK_INTERVAL_SECONDS = 120
 
-# [FINAL PERSISTENCE FIX] Hardcode the data file paths to the application's root directory.
-APP_ROOT = '.' # Use current directory for easier local testing
-DB_FILE = os.path.join(APP_ROOT, 'trading_bot_v14.db')
-SETTINGS_FILE = os.path.join(APP_ROOT, 'settings_v14.json')
+APP_ROOT = '.' 
+DB_FILE = os.path.join(APP_ROOT, 'trading_bot_v15.db')
+SETTINGS_FILE = os.path.join(APP_ROOT, 'settings_v15.json')
 
 
 EGYPT_TZ = ZoneInfo("Africa/Cairo")
 
 # --- إعداد مسجل الأحداث (Logger) --- #
-LOG_FILE = os.path.join(APP_ROOT, 'bot_v14.log')
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO, handlers=[logging.FileHandler(LOG_FILE), logging.StreamHandler()])
+LOG_FILE = os.path.join(APP_ROOT, 'bot_v15.log')
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO, handlers=[logging.FileHandler(LOG_FILE, 'w'), logging.StreamHandler()])
 logging.getLogger('httpx').setLevel(logging.WARNING)
 logging.getLogger('apscheduler').setLevel(logging.WARNING)
 logging.getLogger('telegram').setLevel(logging.WARNING)
@@ -91,7 +89,6 @@ def load_settings():
                         if sub_key not in bot_data["settings"].get(key, {}):
                             bot_data["settings"][key][sub_key] = sub_value; updated = True
             
-            # [FIX] Automatically remove obsolete settings keys
             keys_to_remove = [key for key in bot_data["settings"] if key not in DEFAULT_SETTINGS]
             if keys_to_remove:
                 logging.info(f"Removing obsolete settings keys: {keys_to_remove}")
@@ -143,48 +140,41 @@ def log_recommendation_to_db(signal):
         return None
 
 # --- وحدات المسح المتقدمة (Scanners) --- #
+# [ROBUSTNESS FIX] Removed internal try-except blocks to let the worker handle all errors.
 def analyze_momentum_breakout(df, params):
-    try:
-        macd_col = f"MACD_{params['macd_fast']}_{params['macd_slow']}_{params['macd_signal']}"
-        macds_col = f"MACDs_{params['macd_fast']}_{params['macd_slow']}_{params['macd_signal']}"
-        bbu_col = f"BBU_{params['bbands_period']}_{params['bbands_stddev']:.1f}"
-        rsi_col = f"RSI_{params['rsi_period']}"
-        
-        last, prev = df.iloc[-2], df.iloc[-3]
-        
-        volume_ok = last['volume'] > (df['volume'].rolling(20).mean().iloc[-2] * params['volume_spike_multiplier'])
-        
-        if (prev[macd_col] <= prev[macds_col] and last[macd_col] > last[macds_col] and
-            last['close'] > last[bbu_col] and last['close'] > last["VWAP_D"] and
-            last[rsi_col] < params['rsi_max_level'] and volume_ok):
-             return {"reason": "Momentum Breakout (Vol Cnf)", "type": "long"}
-    except KeyError as e:
-        logging.warning(f"KeyError in momentum_breakout analysis: {e}")
-    except Exception: return None
+    # [BUG FIX] Standardized float formatting for column names to :.1f
+    macd_col = f"MACD_{params['macd_fast']}_{params['macd_slow']}_{params['macd_signal']}"
+    macds_col = f"MACDs_{params['macd_fast']}_{params['macd_slow']}_{params['macd_signal']}"
+    bbu_col = f"BBU_{params['bbands_period']}_{params['bbands_stddev']:.1f}"
+    rsi_col = f"RSI_{params['rsi_period']}"
+    
+    last, prev = df.iloc[-2], df.iloc[-3]
+    
+    volume_ok = last['volume'] > (df['volume'].rolling(20).mean().iloc[-2] * params['volume_spike_multiplier'])
+    
+    if (prev[macd_col] <= prev[macds_col] and last[macd_col] > last[macds_col] and
+        last['close'] > last[bbu_col] and last['close'] > last["VWAP_D"] and
+        last[rsi_col] < params['rsi_max_level'] and volume_ok):
+            return {"reason": "Momentum Breakout (Vol Cnf)", "type": "long"}
     return None
 
 def analyze_breakout_squeeze_pro(df, params):
-    try:
-        bbu_col = f"BBU_{params['bbands_period']}_{params['bbands_stddev']:.1f}"
-        bbl_col = f"BBL_{params['bbands_period']}_{params['bbands_stddev']:.1f}"
-        kcu_col = f"KCUe_{params['keltner_period']}_{params['keltner_atr_multiplier']:.1f}"
-        # [BUG FIX] Corrected the column name for Keltner Channel Lower band
-        kcl_col = f"KCLEe_{params['keltner_period']}_{params['keltner_atr_multiplier']:.1f}"
+    bbu_col = f"BBU_{params['bbands_period']}_{params['bbands_stddev']:.1f}"
+    bbl_col = f"BBL_{params['bbands_period']}_{params['bbands_stddev']:.1f}"
+    kcu_col = f"KCUe_{params['keltner_period']}_{params['keltner_atr_multiplier']:.1f}"
+    kcl_col = f"KCLEe_{params['keltner_period']}_{params['keltner_atr_multiplier']:.1f}"
 
-        last, prev = df.iloc[-2], df.iloc[-3]
+    last, prev = df.iloc[-2], df.iloc[-3]
 
-        is_in_squeeze = prev[bbl_col] > prev[kcl_col] and prev[bbu_col] < prev[kcu_col]
+    is_in_squeeze = prev[bbl_col] > prev[kcl_col] and prev[bbu_col] < prev[kcu_col]
+    
+    if is_in_squeeze:
+        breakout_fired = last['close'] > last[bbu_col]
+        volume_ok = not params['volume_confirmation_enabled'] or last['volume'] > df['volume'].rolling(20).mean().iloc[-2] * 1.5
+        obv_rising = df['OBV'].iloc[-2] > df['OBV'].iloc[-3]
         
-        if is_in_squeeze:
-            breakout_fired = last['close'] > last[bbu_col]
-            volume_ok = not params['volume_confirmation_enabled'] or last['volume'] > df['volume'].rolling(20).mean().iloc[-2] * 1.5
-            obv_rising = df['OBV'].iloc[-2] > df['OBV'].iloc[-3]
-            
-            if breakout_fired and volume_ok and obv_rising:
-                return {"reason": "Keltner/BB Squeeze Breakout", "type": "long"}
-    except KeyError as e:
-        logging.warning(f"KeyError in breakout_squeeze_pro analysis: {e}")
-    except Exception: return None
+        if breakout_fired and volume_ok and obv_rising:
+            return {"reason": "Keltner/BB Squeeze Breakout", "type": "long"}
     return None
 
 def find_divergence_points(series, lookback):
@@ -195,48 +185,38 @@ def find_divergence_points(series, lookback):
 
 def analyze_rsi_divergence(df, params):
     if not SCIPY_AVAILABLE: return None
-    try:
-        rsi_col = f"RSI_{params['rsi_period']}"
-        if df[rsi_col].isnull().all(): return None
+    rsi_col = f"RSI_{params['rsi_period']}"
+    if df[rsi_col].isnull().all(): return None
 
-        subset = df.iloc[-params['lookback_period']:].copy()
-        price_troughs_idx, _ = find_divergence_points(-subset['low'], params['peak_trough_lookback'])
-        rsi_troughs_idx, _ = find_divergence_points(-subset[rsi_col], params['peak_trough_lookback'])
+    subset = df.iloc[-params['lookback_period']:].copy()
+    price_troughs_idx, _ = find_divergence_points(-subset['low'], params['peak_trough_lookback'])
+    rsi_troughs_idx, _ = find_divergence_points(-subset[rsi_col], params['peak_trough_lookback'])
 
-        if len(price_troughs_idx) >= 2 and len(rsi_troughs_idx) >= 2:
-            p_low1_idx, p_low2_idx = price_troughs_idx[-2], price_troughs_idx[-1]
-            r_low1_idx, r_low2_idx = rsi_troughs_idx[-2], rsi_troughs_idx[-1]
-            
-            is_divergence = (subset.iloc[p_low2_idx]['low'] < subset.iloc[p_low1_idx]['low'] and 
-                             subset.iloc[r_low2_idx][rsi_col] > subset.iloc[r_low1_idx][rsi_col])
-            
-            if is_divergence:
-                rsi_exits_oversold = (subset.iloc[r_low1_idx][rsi_col] < 35 and 
-                                      subset.iloc[-2][rsi_col] > 40)
-                confirmation_price = subset.iloc[p_low2_idx:]['high'].max()
-                price_confirmed = df.iloc[-2]['close'] > confirmation_price
+    if len(price_troughs_idx) >= 2 and len(rsi_troughs_idx) >= 2:
+        p_low1_idx, p_low2_idx = price_troughs_idx[-2], price_troughs_idx[-1]
+        r_low1_idx, r_low2_idx = rsi_troughs_idx[-2], rsi_troughs_idx[-1]
+        
+        is_divergence = (subset.iloc[p_low2_idx]['low'] < subset.iloc[p_low1_idx]['low'] and 
+                            subset.iloc[r_low2_idx][rsi_col] > subset.iloc[r_low1_idx][rsi_col])
+        
+        if is_divergence:
+            rsi_exits_oversold = (subset.iloc[r_low1_idx][rsi_col] < 35 and 
+                                    subset.iloc[-2][rsi_col] > 40)
+            confirmation_price = subset.iloc[p_low2_idx:]['high'].max()
+            price_confirmed = df.iloc[-2]['close'] > confirmation_price
 
-                if (not params['confirm_with_rsi_exit'] or rsi_exits_oversold) and price_confirmed:
-                    return {"reason": "Bullish RSI Divergence (Cnf)", "type": "long"}
-    except KeyError as e:
-        logging.warning(f"KeyError in rsi_divergence analysis: {e}")
-    except Exception as e:
-        logging.warning(f"RSI Divergence analysis failed: {e}")
+            if (not params['confirm_with_rsi_exit'] or rsi_exits_oversold) and price_confirmed:
+                return {"reason": "Bullish RSI Divergence (Cnf)", "type": "long"}
     return None
 
 def analyze_supertrend_pullback(df, params):
-    try:
-        # [BUG FIX] Use the correct direction column 'SUPERTd'
-        st_dir_col = f"SUPERTd_{params['atr_period']}_{params['atr_multiplier']:.1f}"
-        last, prev = df.iloc[-2], df.iloc[-3]
-        
-        st_flipped_bullish = prev[st_dir_col] == -1 and last[st_dir_col] == 1
+    st_dir_col = f"SUPERTd_{params['atr_period']}_{params['atr_multiplier']:.1f}"
+    last, prev = df.iloc[-2], df.iloc[-3]
+    
+    st_flipped_bullish = prev[st_dir_col] == -1 and last[st_dir_col] == 1
 
-        if st_flipped_bullish:
-            return {"reason": "Supertrend Flip to Bullish", "type": "long"}
-    except KeyError as e:
-        logging.warning(f"KeyError in supertrend_pullback analysis: {e}")
-    except Exception: return None
+    if st_flipped_bullish:
+        return {"reason": "Supertrend Flip to Bullish", "type": "long"}
     return None
 
 SCANNERS = {
@@ -284,7 +264,6 @@ async def get_higher_timeframe_trend(exchange, symbol, ma_period):
         is_bullish = last_candle['close'] > last_candle[f'SMA_{ma_period}']
         return is_bullish, "Bullish" if is_bullish else "Bearish"
     except Exception as e:
-        logging.warning(f"Could not fetch HTF trend for {symbol}: {e}")
         return None, f"Error: {e}"
 
 async def worker(queue, results_list, settings, failure_counter):
@@ -308,7 +287,6 @@ async def worker(queue, results_list, settings, failure_counter):
             if len(ohlcv) < 100: logging.info(f"Skipping {symbol}: Not enough data ({len(ohlcv)} candles)"); continue
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']); df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms'); df.set_index('timestamp', inplace=True)
             
-            # Pre-calculate all potential indicators
             df.ta.adx(append=True)
             df.ta.atr(length=settings['atr_period'], append=True)
             df.ta.obv(append=True)
@@ -341,7 +319,7 @@ async def worker(queue, results_list, settings, failure_counter):
                     results_list.append(signal)
                     break 
         except Exception as e: 
-            logging.error(f"CRITICAL ERROR in worker for {symbol}: {e}", exc_info=True)
+            logging.error(f"CRITICAL ERROR in worker for {symbol}: {e}", exc_info=False) # Set exc_info to False for cleaner logs
             failure_counter[0] += 1
         finally:
             queue.task_done()
@@ -365,7 +343,7 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
         logging.info("Scan complete: No markets to scan."); status['scan_in_progress'] = False; return
     
     queue = asyncio.Queue(); [await queue.put(market) for market in top_markets]
-    signals, failure_counter = [], [0] # Use a list to make it mutable
+    signals, failure_counter = [], [0]
     worker_tasks = [asyncio.create_task(worker(queue, signals, settings, failure_counter)) for _ in range(settings['concurrent_workers'])]
     await queue.join(); [task.cancel() for task in worker_tasks]
     
@@ -509,7 +487,7 @@ async def check_market_regime():
 # --- أوامر ولوحات مفاتيح تليجرام --- #
 main_menu_keyboard = [["📊 الإحصائيات", "📈 الصفقات النشطة"], ["⚙️ الإعدادات", "👀 ماذا يجري في الخلفية؟"], ["ℹ️ مساعدة", "🔬 فحص يدوي الآن"]]
 settings_menu_keyboard = [["🎭 تفعيل/تعطيل الماسحات"], ["🔧 تعديل المعايير", "🔙 القائمة الرئيسية"]]
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("أهلاً بك في محاكي التداول المتقدم! (v14)", reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True))
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("أهلاً بك في محاكي التداول المتقدم! (v15)", reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True))
 async def scan_now_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if bot_data['status_snapshot'].get('scan_in_progress', False): await update.message.reply_text("⚠️ فحص آخر قيد التنفيذ حالياً."); return
     await update.message.reply_text("⏳ جاري بدء الفحص اليدوي...")
@@ -682,11 +660,11 @@ async def post_init(application: Application):
         report_time = dt_time(hour=23, minute=55, tzinfo=EGYPT_TZ)
         application.job_queue.run_daily(send_daily_report, time=report_time, name='daily_report')
         logging.info(f"Daily report scheduled for {report_time.strftime('%H:%M:%S')} {EGYPT_TZ}.")
-    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *محاكي التداول المتقدم (v14 - STABLE) جاهز للعمل!*", parse_mode=ParseMode.MARKDOWN)
+    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *محاكي التداول المتقدم (v15 - STABLE) جاهز للعمل!*", parse_mode=ParseMode.MARKDOWN)
     logging.info("Post-init finished.")
 async def post_shutdown(application: Application): await asyncio.gather(*[ex.close() for ex in bot_data["exchanges"].values()]); logging.info("Connections closed.")
 def main():
-    print("🚀 Starting Pro Trading Simulator Bot (v14 - STABLE)...")
+    print("🚀 Starting Pro Trading Simulator Bot (v15 - STABLE)...")
     load_settings(); init_database()
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).post_shutdown(post_shutdown).build()
     application.add_handler(CommandHandler("start", start_command)); application.add_handler(CommandHandler("scan", scan_now_command))
@@ -698,5 +676,4 @@ def main():
 if __name__ == '__main__':
     try: main()
     except Exception as e: logging.critical(f"Bot stopped due to a critical error: {e}", exc_info=True)
-
 
