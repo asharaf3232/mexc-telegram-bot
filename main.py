@@ -27,16 +27,16 @@ if TELEGRAM_BOT_TOKEN == 'YOUR_BOT_TOKEN_HERE' or TELEGRAM_CHAT_ID == 'YOUR_CHAT
     exit()
 
 # --- إعدادات البوت --- #
-EXCHANGES_TO_SCAN = ['binance', 'okx', 'bybit', 'kucoin', 'gate', 'mexc'] # [FIX] Added a 6th exchange
+EXCHANGES_TO_SCAN = ['binance', 'okx', 'bybit', 'kucoin', 'gate', 'mexc']
 TIMEFRAME = '15m'
 SCAN_INTERVAL_SECONDS = 900
 TRACK_INTERVAL_SECONDS = 120
 SETTINGS_FILE = 'settings.json'
-DB_FILE = 'trading_bot_v10.db'
+DB_FILE = 'trading_bot_v11.db'
 EGYPT_TZ = ZoneInfo("Africa/Cairo")
 
 # --- إعداد مسجل الأحداث (Logger) --- #
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO, handlers=[logging.FileHandler("bot_v10.log"), logging.StreamHandler()])
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO, handlers=[logging.FileHandler("bot_v11.log"), logging.StreamHandler()])
 logging.getLogger('httpx').setLevel(logging.WARNING)
 logging.getLogger('apscheduler').setLevel(logging.WARNING)
 logging.getLogger('telegram').setLevel(logging.WARNING)
@@ -415,7 +415,7 @@ async def run_backtest_logic(update: Update, symbol: str, timeframe: str, limit:
 main_menu_keyboard = [["📊 الإحصائيات", "📈 الصفقات النشطة"], ["🧪 اختبار تاريخي", "⚙️ الإعدادات"], ["👀 ماذا يجري في الخلفية؟", "ℹ️ مساعدة"]]
 settings_menu_keyboard = [["🎭 تفعيل/تعطيل الماسحات"], ["🔧 تعديل المعايير", "🔙 القائمة الرئيسية"]]
 
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("أهلاً بك في محاكي التداول المتقدم! (v10)", reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True))
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("أهلاً بك في محاكي التداول المتقدم! (v11)", reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True))
 async def show_settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target_message = update.message or update.callback_query.message
     await target_message.reply_text("اختر الإعداد الذي تريد تعديله:", reply_markup=ReplyKeyboardMarkup(settings_menu_keyboard, resize_keyboard=True))
@@ -434,6 +434,7 @@ async def show_scanners_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
     target_message = update.message or update.callback_query.message
     await target_message.reply_text("اختر الماسحات التي تريد تفعيلها أو تعطيلها:", reply_markup=get_scanners_keyboard())
 
+# [CORE FIX] This function now correctly handles the button toggles and UI updates.
 async def toggle_scanner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     scanner_name = query.data.split("_")[1]
@@ -447,12 +448,11 @@ async def toggle_scanner_callback(update: Update, context: ContextTypes.DEFAULT_
     await query.answer(f"تم {'تعطيل' if scanner_name not in active_scanners else 'تفعيل'} {scanner_name}")
     
     new_markup = get_scanners_keyboard()
-    if query.message.reply_markup.to_json() != new_markup.to_json():
-        try:
-            await query.edit_message_reply_markup(reply_markup=new_markup)
-        except BadRequest as e:
-            if "Message is not modified" not in str(e):
-                logging.error(f"Error editing scanner menu: {e}")
+    try:
+        await query.edit_message_reply_markup(reply_markup=new_markup)
+    except BadRequest as e:
+        if "Message is not modified" not in str(e):
+            logging.error(f"Error editing scanner menu: {e}")
 
 async def show_set_parameter_instructions(update: Update, context: ContextTypes.DEFAULT_TYPE):
     params_list = "\n".join([f"`{k}`" for k, v in bot_data["settings"].items() if not isinstance(v, (dict, list))])
@@ -579,13 +579,13 @@ async def post_init(application: Application):
     else:
         logging.error("Job queue not found in application object!")
     
-    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *محاكي التداول المتقدم (v10) جاهز للعمل!*", parse_mode=ParseMode.MARKDOWN)
+    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *محاكي التداول المتقدم (v11) جاهز للعمل!*", parse_mode=ParseMode.MARKDOWN)
     logging.info("Post-init finished.")
 
 async def post_shutdown(application: Application): await asyncio.gather(*[ex.close() for ex in bot_data["exchanges"].values()]); logging.info("Connections closed.")
 
 def main():
-    print("🚀 Starting Pro Trading Simulator Bot (v10)...")
+    print("🚀 Starting Pro Trading Simulator Bot (v11)...")
     load_settings(); init_database()
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).post_shutdown(post_shutdown).build()
     
