@@ -45,14 +45,14 @@ SCAN_INTERVAL_SECONDS = 900
 TRACK_INTERVAL_SECONDS = 120
 
 APP_ROOT = '.'
-DB_FILE = os.path.join(APP_ROOT, 'trading_bot_v22.db')
-SETTINGS_FILE = os.path.join(APP_ROOT, 'settings_v22.json')
+DB_FILE = os.path.join(APP_ROOT, 'trading_bot_v23.db')
+SETTINGS_FILE = os.path.join(APP_ROOT, 'settings_v23.json')
 
 
 EGYPT_TZ = ZoneInfo("Africa/Cairo")
 
 # --- إعداد مسجل الأحداث (Logger) --- #
-LOG_FILE = os.path.join(APP_ROOT, 'bot_v22.log')
+LOG_FILE = os.path.join(APP_ROOT, 'bot_v23.log')
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO, handlers=[logging.FileHandler(LOG_FILE, 'w'), logging.StreamHandler()])
 logging.getLogger('httpx').setLevel(logging.WARNING)
 logging.getLogger('apscheduler').setLevel(logging.WARNING)
@@ -78,7 +78,14 @@ PRESET_STRICT = {
   "ema_trend_filter": {"enabled": True, "ema_period": 200},
   "min_tp_sl_filter": {"min_tp_percent": 1.8, "min_sl_percent": 0.9}
 }
-PRESETS = {"PRO": PRESET_PRO, "LAX": PRESET_LAX, "STRICT": PRESET_STRICT}
+# [NEW] Added a very relaxed preset for quiet market conditions
+PRESET_VERY_LAX = {
+  "liquidity_filters": {"min_quote_volume_24h_usd": 200000, "max_spread_percent": 2.0, "rvol_period": 10, "min_rvol": 0.8},
+  "volatility_filters": {"atr_period_for_filter": 10, "min_atr_percent": 0.2},
+  "ema_trend_filter": {"enabled": False, "ema_period": 200},
+  "min_tp_sl_filter": {"min_tp_percent": 0.3, "min_sl_percent": 0.15}
+}
+PRESETS = {"PRO": PRESET_PRO, "LAX": PRESET_LAX, "STRICT": PRESET_STRICT, "VERY_LAX": PRESET_VERY_LAX}
 
 
 # --- متغيرات الحالة العامة للبوت --- #
@@ -102,7 +109,6 @@ DEFAULT_SETTINGS = {
     "stablecoin_filter": {"exclude_bases": ["USDT","USDC","DAI","FDUSD","TUSD","USDE","PYUSD","GUSD","EURT","USDJ"]},
     "ema_trend_filter": {"enabled": True, "ema_period": 200},
     "min_tp_sl_filter": {"min_tp_percent": 1.0, "min_sl_percent": 0.5},
-    # --- [NEW FEATURE] Signal Strength ---
     "min_signal_strength": 1
 }
 
@@ -422,7 +428,6 @@ async def worker(queue, results_list, settings, failure_counter):
                     continue
                 logging.info(f"ADX Filter: PASSED (ADX is {adx_value:.2f}) for {symbol}")
             
-            # --- [FEATURE] Confluence Check: Run all scanners and count signals ---
             confirmed_reasons = []
             analysis_df = df.copy() 
 
@@ -508,7 +513,6 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
         worker_tasks = [asyncio.create_task(worker(queue, signals, settings, failure_counter)) for _ in range(settings['concurrent_workers'])]
         await queue.join(); [task.cancel() for task in worker_tasks]
         
-        # [FEATURE] Sort signals by strength to prioritize the best ones
         signals.sort(key=lambda s: s.get('strength', 0), reverse=True)
 
         total_signals = len(signals)
@@ -656,7 +660,7 @@ async def check_market_regime():
 # --- أوامر ولوحات مفاتيح تليجرام --- #
 main_menu_keyboard = [["📊 الإحصائيات", "📈 الصفقات النشطة"], ["⚙️ الإعدادات", "👀 ماذا يجري في الخلفية؟"], ["ℹ️ مساعدة", "🔬 فحص يدوي الآن"]]
 settings_menu_keyboard = [["🎭 تفعيل/تعطيل الماسحات", "🏁 أنماط جاهزة"], ["🔧 تعديل المعايير", "🔙 القائمة الرئيسية"]]
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("أهلاً بك في محاكي التداول المتقدم! (v22 - Signal Strength)", reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True))
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("أهلاً بك في محاكي التداول المتقدم! (v23 - Presets+)", reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True))
 async def scan_now_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if bot_data['status_snapshot'].get('scan_in_progress', False): await update.message.reply_text("⚠️ فحص آخر قيد التنفيذ حالياً."); return
     await update.message.reply_text("⏳ جاري بدء الفحص اليدوي...")
@@ -676,6 +680,7 @@ def get_presets_keyboard():
         [InlineKeyboardButton("🚦 احترافية (متوازنة)", callback_data="preset_PRO")],
         [InlineKeyboardButton("🎯 متشددة", callback_data="preset_STRICT")],
         [InlineKeyboardButton("🌙 متساهلة", callback_data="preset_LAX")],
+        [InlineKeyboardButton("⚠️ فائق التساهل", callback_data="preset_VERY_LAX")],
         [InlineKeyboardButton("🔙 العودة للإعدادات", callback_data="back_to_settings")]
     ])
 
@@ -818,7 +823,8 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             preset_messages = {
                 "PRO": "✅ تم تفعيل النمط الاحترافي (متوازن).",
                 "STRICT": "✅ تم تفعيل النمط المتشدد.",
-                "LAX": "✅ تم تفعيل النمط المتساهل."
+                "LAX": "✅ تم تفعيل النمط المتساهل.",
+                "VERY_LAX": "✅ تم تفعيل النمط فائق التساهل (لظروف السوق الهادئة)."
             }
             try:
                 await query.edit_message_text(preset_messages.get(preset_name, "✅ تم تطبيق النمط."), reply_markup=get_presets_keyboard())
@@ -868,11 +874,11 @@ async def post_init(application: Application):
         report_time = dt_time(hour=23, minute=55, tzinfo=EGYPT_TZ)
         application.job_queue.run_daily(send_daily_report, time=report_time, name='daily_report')
         logging.info(f"Daily report scheduled for {report_time.strftime('%H:%M:%S')} {EGYPT_TZ}.")
-    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *محاكي التداول المتقدم (v22 - Signal Strength) جاهز للعمل!*", parse_mode=ParseMode.MARKDOWN)
+    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *محاكي التداول المتقدم (v23 - Presets+) جاهز للعمل!*", parse_mode=ParseMode.MARKDOWN)
     logging.info("Post-init finished.")
 async def post_shutdown(application: Application): await asyncio.gather(*[ex.close() for ex in bot_data["exchanges"].values()]); logging.info("Connections closed.")
 def main():
-    print("🚀 Starting Pro Trading Simulator Bot (v22 - Signal Strength)...")
+    print("🚀 Starting Pro Trading Simulator Bot (v23 - Presets+)...")
     load_settings(); init_database()
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).post_shutdown(post_shutdown).build()
     application.add_handler(CommandHandler("start", start_command)); application.add_handler(CommandHandler("scan", scan_now_command))
