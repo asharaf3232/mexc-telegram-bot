@@ -61,6 +61,8 @@ logging.getLogger('telegram').setLevel(logging.WARNING)
 
 # --- متغيرات الحالة العامة للبوت --- #
 bot_data = {"exchanges": {}, "last_signal_time": {}, "settings": {}, "status_snapshot": {"last_scan_start_time": "N/A", "last_scan_end_time": "N/A", "markets_found": 0, "signals_found": 0, "active_trades_count": 0, "scan_in_progress": False}}
+# [FIX] Add a lock to prevent concurrent scan executions
+scan_lock = asyncio.Lock()
 
 # --- إدارة الإعدادات --- #
 DEFAULT_SETTINGS = {
@@ -334,6 +336,9 @@ async def worker(queue, results_list, settings, failure_counter):
             continue
         
         try:
+            # [FIX] Add a small delay to avoid hitting rate limits, especially on MEXC
+            await asyncio.sleep(0.2)
+            
             logging.info(f"--- Checking {symbol} on {exchange.id} ---")
             
             # --- [IMPROVEMENT] Pre-scan filters ---
@@ -454,64 +459,70 @@ async def worker(queue, results_list, settings, failure_counter):
             queue.task_done()
 
 async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
-    status = bot_data['status_snapshot']
-    status.update({"scan_in_progress": True, "last_scan_start_time": datetime.now(EGYPT_TZ).strftime('%Y-%m-%d %H:%M:%S'), "signals_found": 0})
-    settings = bot_data["settings"]
-    try:
-        conn = sqlite3.connect(DB_FILE, timeout=10); cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM trades WHERE status = 'نشطة'")
-        active_trades_count = cursor.fetchone()[0]; conn.close()
-    except Exception as e:
-        logging.error(f"DB Error in perform_scan: {e}"); active_trades_count = settings.get("max_concurrent_trades", 5)
-    
-    if settings.get('market_regime_filter_enabled', True) and not await check_market_regime():
-        logging.info("Skipping scan: Bearish market regime detected."); status['scan_in_progress'] = False; return
-    
-    top_markets = await aggregate_top_movers()
-    if not top_markets:
-        logging.info("Scan complete: No markets to scan."); status['scan_in_progress'] = False; return
-    
-    queue = asyncio.Queue(); [await queue.put(market) for market in top_markets]
-    signals, failure_counter = [], [0]
-    worker_tasks = [asyncio.create_task(worker(queue, signals, settings, failure_counter)) for _ in range(settings['concurrent_workers'])]
-    await queue.join(); [task.cancel() for task in worker_tasks]
-    
-    total_signals = len(signals)
-    new_trades, opportunities = 0, 0
-    last_signal_time = bot_data['last_signal_time']
-    for signal in signals:
-        if signal['symbol'] in last_signal_time and (time.time() - last_signal_time.get(signal['symbol'], 0)) <= (SCAN_INTERVAL_SECONDS * 4): 
-            logging.info(f"Signal for {signal['symbol']} skipped due to recent notification cooldown.")
-            continue
-        
-        trade_amount_usdt = settings["virtual_portfolio_balance_usdt"] * (settings["virtual_trade_size_percentage"] / 100)
-        signal.update({'quantity': trade_amount_usdt / signal['entry_price'], 'entry_value_usdt': trade_amount_usdt})
-        
-        if active_trades_count < settings.get("max_concurrent_trades", 5):
-            trade_id = log_recommendation_to_db(signal)
-            if trade_id:
-                signal['trade_id'] = trade_id
-                await send_telegram_message(context.bot, signal, is_new=True)
-                active_trades_count += 1; new_trades += 1
-        else:
-            await send_telegram_message(context.bot, signal, is_opportunity=True)
-            opportunities += 1
-        await asyncio.sleep(0.5)
-        last_signal_time[signal['symbol']] = time.time()
+    async with scan_lock:
+        if bot_data['status_snapshot']['scan_in_progress']:
+            logging.warning("Scan attempted while another was in progress. Skipped.")
+            return
 
-    failures = failure_counter[0]
-    logging.info(f"Scan complete. Found: {total_signals}, Entered: {new_trades}, Opportunities: {opportunities}, Failures: {failures}.")
-    
-    if total_signals > 0 or failures > 0:
-        summary_message = (f"🔹 *ملخص الفحص* 🔹\n\n"
-                            f"▫️ إجمالي الإشارات: *{total_signals}*\n"
-                            f"✅ صفقات جديدة: *{new_trades}*\n"
-                            f"💡 فرص إضافية: *{opportunities}*\n"
-                            f"⚠️ عملات فشل تحليلها: *{failures}*")
-        await send_telegram_message(context.bot, {'custom_message': summary_message, 'target_chat': TELEGRAM_CHAT_ID})
+        status = bot_data['status_snapshot']
+        status.update({"scan_in_progress": True, "last_scan_start_time": datetime.now(EGYPT_TZ).strftime('%Y-%m-%d %H:%M:%S'), "signals_found": 0})
         
-    status['signals_found'] = new_trades + opportunities
-    status['last_scan_end_time'] = datetime.now(EGYPT_TZ).strftime('%Y-%m-%d %H:%M:%S'); status['scan_in_progress'] = False
+        settings = bot_data["settings"]
+        try:
+            conn = sqlite3.connect(DB_FILE, timeout=10); cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM trades WHERE status = 'نشطة'")
+            active_trades_count = cursor.fetchone()[0]; conn.close()
+        except Exception as e:
+            logging.error(f"DB Error in perform_scan: {e}"); active_trades_count = settings.get("max_concurrent_trades", 5)
+        
+        if settings.get('market_regime_filter_enabled', True) and not await check_market_regime():
+            logging.info("Skipping scan: Bearish market regime detected."); status['scan_in_progress'] = False; return
+        
+        top_markets = await aggregate_top_movers()
+        if not top_markets:
+            logging.info("Scan complete: No markets to scan."); status['scan_in_progress'] = False; return
+        
+        queue = asyncio.Queue(); [await queue.put(market) for market in top_markets]
+        signals, failure_counter = [], [0]
+        worker_tasks = [asyncio.create_task(worker(queue, signals, settings, failure_counter)) for _ in range(settings['concurrent_workers'])]
+        await queue.join(); [task.cancel() for task in worker_tasks]
+        
+        total_signals = len(signals)
+        new_trades, opportunities = 0, 0
+        last_signal_time = bot_data['last_signal_time']
+        for signal in signals:
+            if signal['symbol'] in last_signal_time and (time.time() - last_signal_time.get(signal['symbol'], 0)) <= (SCAN_INTERVAL_SECONDS * 4): 
+                logging.info(f"Signal for {signal['symbol']} skipped due to recent notification cooldown.")
+                continue
+            
+            trade_amount_usdt = settings["virtual_portfolio_balance_usdt"] * (settings["virtual_trade_size_percentage"] / 100)
+            signal.update({'quantity': trade_amount_usdt / signal['entry_price'], 'entry_value_usdt': trade_amount_usdt})
+            
+            if active_trades_count < settings.get("max_concurrent_trades", 5):
+                trade_id = log_recommendation_to_db(signal)
+                if trade_id:
+                    signal['trade_id'] = trade_id
+                    await send_telegram_message(context.bot, signal, is_new=True)
+                    active_trades_count += 1; new_trades += 1
+            else:
+                await send_telegram_message(context.bot, signal, is_opportunity=True)
+                opportunities += 1
+            await asyncio.sleep(0.5)
+            last_signal_time[signal['symbol']] = time.time()
+
+        failures = failure_counter[0]
+        logging.info(f"Scan complete. Found: {total_signals}, Entered: {new_trades}, Opportunities: {opportunities}, Failures: {failures}.")
+        
+        if total_signals > 0 or failures > 0:
+            summary_message = (f"🔹 *ملخص الفحص* 🔹\n\n"
+                                f"▫️ إجمالي الإشارات: *{total_signals}*\n"
+                                f"✅ صفقات جديدة: *{new_trades}*\n"
+                                f"💡 فرص إضافية: *{opportunities}*\n"
+                                f"⚠️ عملات فشل تحليلها: *{failures}*")
+            await send_telegram_message(context.bot, {'custom_message': summary_message, 'target_chat': TELEGRAM_CHAT_ID})
+            
+        status['signals_found'] = new_trades + opportunities
+        status['last_scan_end_time'] = datetime.now(EGYPT_TZ).strftime('%Y-%m-%d %H:%M:%S'); status['scan_in_progress'] = False
 
 async def send_telegram_message(bot, signal_data, is_new=False, is_opportunity=False, status_update=None, update_type=None):
     message, keyboard, target_chat = "", None, TELEGRAM_CHAT_ID
@@ -619,7 +630,7 @@ async def check_market_regime():
 # --- أوامر ولوحات مفاتيح تليجرام --- #
 main_menu_keyboard = [["📊 الإحصائيات", "📈 الصفقات النشطة"], ["⚙️ الإعدادات", "👀 ماذا يجري في الخلفية؟"], ["ℹ️ مساعدة", "🔬 فحص يدوي الآن"]]
 settings_menu_keyboard = [["🎭 تفعيل/تعطيل الماسحات"], ["🔧 تعديل المعايير", "🔙 القائمة الرئيسية"]]
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("أهلاً بك في محاكي التداول المتقدم! (v20 - Enhanced Filters)", reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True))
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("أهلاً بك في محاكي التداول المتقدم! (v20 - Stable)", reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True))
 async def scan_now_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if bot_data['status_snapshot'].get('scan_in_progress', False): await update.message.reply_text("⚠️ فحص آخر قيد التنفيذ حالياً."); return
     await update.message.reply_text("⏳ جاري بدء الفحص اليدوي...")
@@ -792,11 +803,11 @@ async def post_init(application: Application):
         report_time = dt_time(hour=23, minute=55, tzinfo=EGYPT_TZ)
         application.job_queue.run_daily(send_daily_report, time=report_time, name='daily_report')
         logging.info(f"Daily report scheduled for {report_time.strftime('%H:%M:%S')} {EGYPT_TZ}.")
-    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *محاكي التداول المتقدم (v20 - Enhanced Filters) جاهز للعمل!*", parse_mode=ParseMode.MARKDOWN)
+    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *محاكي التداول المتقدم (v20 - Stable) جاهز للعمل!*", parse_mode=ParseMode.MARKDOWN)
     logging.info("Post-init finished.")
 async def post_shutdown(application: Application): await asyncio.gather(*[ex.close() for ex in bot_data["exchanges"].values()]); logging.info("Connections closed.")
 def main():
-    print("🚀 Starting Pro Trading Simulator Bot (v20 - Enhanced Filters)...")
+    print("🚀 Starting Pro Trading Simulator Bot (v20 - Stable)...")
     load_settings(); init_database()
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).post_shutdown(post_shutdown).build()
     application.add_handler(CommandHandler("start", start_command)); application.add_handler(CommandHandler("scan", scan_now_command))
