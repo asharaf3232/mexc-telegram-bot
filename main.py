@@ -18,6 +18,15 @@ from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
 from telegram.error import BadRequest
 
+# [NEW] Gracefully handle optional scipy import
+try:
+    from scipy.signal import find_peaks
+    SCIPY_AVAILABLE = True
+except ImportError:
+    SCIPY_AVAILABLE = False
+    logging.warning("Library 'scipy' not found. RSI Divergence strategy will be disabled.")
+
+
 # --- الإعدادات الأساسية --- #
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', 'YOUR_BOT_TOKEN_HERE')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID', 'YOUR_CHAT_ID_HERE')
@@ -32,7 +41,11 @@ TIMEFRAME = '15m'
 SCAN_INTERVAL_SECONDS = 900
 TRACK_INTERVAL_SECONDS = 120
 SETTINGS_FILE = 'settings.json'
-DB_FILE = 'trading_bot_v12.db'
+
+# [DATABASE FIX] Use an absolute path for the database file to ensure consistency
+script_dir = os.path.dirname(os.path.abspath(__file__))
+DB_FILE = os.path.join(script_dir, 'trading_bot_v12.db')
+
 EGYPT_TZ = ZoneInfo("Africa/Cairo")
 
 # --- إعداد مسجل الأحداث (Logger) --- #
@@ -87,7 +100,7 @@ def init_database():
     ''')
     conn.commit()
     conn.close()
-    logging.info("Database initialized successfully.")
+    logging.info(f"Database initialized successfully at: {DB_FILE}")
 
 def log_recommendation_to_db(signal):
     conn = sqlite3.connect(DB_FILE)
@@ -131,12 +144,15 @@ def analyze_breakout_squeeze(df, params):
     return None
 
 def find_divergence_points(series, lookback):
-    from scipy.signal import find_peaks
+    if not SCIPY_AVAILABLE:
+        return [], []
     peaks, _ = find_peaks(series, distance=lookback)
     troughs, _ = find_peaks(-series, distance=lookback)
     return peaks, troughs
 
 def analyze_rsi_divergence(df, params):
+    if not SCIPY_AVAILABLE:
+        return None
     try:
         rsi_col = f"RSI_{params['rsi_period']}"
         df.ta.rsi(length=params['rsi_period'], append=True, col_names=(rsi_col,))
@@ -161,7 +177,7 @@ def analyze_rsi_divergence(df, params):
             if subset.iloc[p_high2_idx]['high'] > subset.iloc[p_high1_idx]['high'] and subset.iloc[r_high2_idx][rsi_col] < subset.iloc[r_high1_idx][rsi_col]:
                 return {"reason": "Bearish RSI Divergence", "type": "bearish_signal"}
     except Exception as e:
-        logging.warning(f"RSI Divergence analysis failed: {e}")
+        logging.warning(f"RSI Divergence analysis failed during execution: {e}")
     return None
 
 SCANNERS = {
