@@ -233,10 +233,22 @@ async def aggregate_top_movers():
         except Exception: return []
     results = await asyncio.gather(*[fetch(ex_id, ex) for ex_id, ex in bot_data["exchanges"].items()])
     for res in results: all_tickers.extend(res)
-    usdt_tickers = [t for t in all_tickers if t.get('symbol') and 'USDT' in t['symbol'].upper() and not any(k in t['symbol'].upper() for k in ['UP','DOWN','3L','3S','BEAR','BULL'])]
+    
+    # [FINAL PAIR FILTER] This is the crucial fix. Ensure we only trade crypto pairs where USDT is the quote currency.
+    # This filters out fiat pairs like USDT/ARS and inverse pairs.
+    usdt_tickers = [
+        t for t in all_tickers 
+        if t.get('symbol') 
+        and t['symbol'].upper().endswith('/USDT') 
+        and not any(k in t['symbol'].upper() for k in ['UP','DOWN','3L','3S','BEAR','BULL'])
+    ]
+
     sorted_tickers = sorted(usdt_tickers, key=lambda t: t.get('quoteVolume', 0) or 0, reverse=True)
+    # Use a dictionary to ensure each symbol is unique, preferring the one from the exchange with higher volume
     unique_symbols = {t['symbol']: {'exchange': t['exchange'], 'symbol': t['symbol']} for t in sorted_tickers}
     final_list = list(unique_symbols.values())[:bot_data["settings"]['top_n_symbols_by_volume']]
+    
+    logging.info(f"Aggregated markets. Found {len(all_tickers)} total tickers, filtered down to {len(usdt_tickers)} USDT pairs, selected top {len(final_list)} unique pairs by volume.")
     bot_data['status_snapshot']['markets_found'] = len(final_list)
     return final_list
 
