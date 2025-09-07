@@ -381,11 +381,14 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
     worker_tasks = [asyncio.create_task(worker(queue, signals, settings, failure_counter)) for _ in range(settings['concurrent_workers'])]
     await queue.join(); [task.cancel() for task in worker_tasks]
     
-    total_signals, new_trades, opportunities = 0, 0, 0
+    total_signals = len(signals) # عد كل الإشارات الأولية التي تم العثور عليها
+    new_trades, opportunities = 0, 0
     last_signal_time = bot_data['last_signal_time']
     for signal in signals:
-        if signal['symbol'] in last_signal_time and (time.time() - last_signal_time.get(signal['symbol'], 0)) <= (SCAN_INTERVAL_SECONDS * 4): continue
-        total_signals += 1
+        if signal['symbol'] in last_signal_time and (time.time() - last_signal_time.get(signal['symbol'], 0)) <= (SCAN_INTERVAL_SECONDS * 4): 
+            logging.info(f"Signal for {signal['symbol']} skipped due to recent notification cooldown.")
+            continue
+        
         trade_amount_usdt = settings["virtual_portfolio_balance_usdt"] * (settings["virtual_trade_size_percentage"] / 100)
         signal.update({'quantity': trade_amount_usdt / signal['entry_price'], 'entry_value_usdt': trade_amount_usdt})
         
@@ -710,3 +713,4 @@ def main():
 if __name__ == '__main__':
     try: main()
     except Exception as e: logging.critical(f"Bot stopped due to a critical error: {e}", exc_info=True)
+
