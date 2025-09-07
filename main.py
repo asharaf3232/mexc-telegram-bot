@@ -16,7 +16,7 @@ from zoneinfo import ZoneInfo
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
-from telegram.error import BadRequest, RetryAfter
+from telegram.error import BadRequest, RetryAfter, TimedOut
 
 # [NEW] Gracefully handle optional scipy import
 try:
@@ -336,7 +336,8 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
         else:
             await send_telegram_message(context.bot, signal, is_opportunity=True)
             opportunities_identified += 1
-
+        
+        await asyncio.sleep(0.5) # [FINAL RELIABILITY FIX] Pace the messages to avoid flood limits.
         last_signal_time[symbol] = current_time
     
     summary_log = f"Scan complete. Found: {total_signals_found_this_run}, Entered: {new_trades_entered}, Opportunities: {opportunities_identified}."
@@ -347,43 +348,50 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
                            f"▫️ إجمالي الإشارات التي تم العثور عليها: *{total_signals_found_this_run}*\n"
                            f"✅ صفقات جديدة تم الدخول بها: *{new_trades_entered}*\n"
                            f"💡 فرص إضافية تم تحديدها: *{opportunities_identified}*")
-        await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=summary_message, parse_mode=ParseMode.MARKDOWN)
+        await send_telegram_message(context.bot, {'custom_message': summary_message, 'target_chat': TELEGRAM_CHAT_ID})
+
 
     status['signals_found'] = new_trades_entered + opportunities_identified
     status['last_scan_end_time'] = datetime.now(EGYPT_TZ).strftime('%Y-%m-%d %H:%M:%S'); status['scan_in_progress'] = False
 
+# [FINAL RELIABILITY FIX] A single, robust function to send all messages with retry logic.
 async def send_telegram_message(bot, signal_data, is_new=False, is_opportunity=False, status_update=None, update_type=None):
-    message = ""; keyboard = None
-    target_chat = TELEGRAM_CHAT_ID # Default to the control chat
+    message = ""; keyboard = None; target_chat = TELEGRAM_CHAT_ID
 
-    if is_new:
-        target_chat = TELEGRAM_SIGNAL_CHANNEL_ID # Send new trades to the signal channel
+    if 'custom_message' in signal_data:
+        message = signal_data['custom_message']
+        target_chat = signal_data['target_chat']
+    elif is_new:
+        target_chat = TELEGRAM_SIGNAL_CHANNEL_ID
         message = (f"✅ *توصية صفقة جديدة* ✅\n\n*العملة:* `{signal_data['symbol']}` | *المنصة:* `{signal_data['exchange']}`\n*سبب الدخول:* `{signal_data['reason']}`\n\n*سعر الدخول:* `${signal_data['entry_price']:,.4f}`\n*قيمة الصفقة:* `${signal_data['entry_value_usdt']:,.2f}`\n\n🎯 *جني الأرباح:* `${signal_data['take_profit']:,.4f}`\n🛑 *وقف الخسارة:* `${signal_data['stop_loss']:,.4f}`\n\n*للمتابعة، استخدم الأمر `/check {signal_data['trade_id']}` في البوت*")
     elif is_opportunity:
-        target_chat = TELEGRAM_SIGNAL_CHANNEL_ID # Send opportunities to the signal channel
-        message = (
-            f"💡 *فرصة تداول محتملة* 💡\n\n"
-            f"*العملة:* `{signal_data['symbol']}` | *المنصة:* `{signal_data['exchange']}`\n"
-            f"*سبب الدخول:* `{signal_data['reason']}`\n\n"
-            f"📈 *سعر الدخول المقترح:* `${signal_data['entry_price']:,.4f}`\n"
-            f"🎯 *جني الأرباح المقترح:* `${signal_data['take_profit']:,.4f}`\n"
-            f"🛑 *وقف الخسارة المقترح:* `${signal_data['stop_loss']:,.4f}`"
-        )
-    elif status_update in ['ناجحة', 'فاشلة']:
-        # [FEATURE] Send closure reports to the signal channel for transparency
         target_chat = TELEGRAM_SIGNAL_CHANNEL_ID
-        pnl_percent = (signal_data['pnl_usdt'] / signal_data['entry_value_usdt'] * 100) if signal_data.get('entry_value_usdt') and signal_data['entry_value_usdt'] > 0 else 0
+        message = (f"💡 *فرصة تداول محتملة* 💡\n\n*العملة:* `{signal_data['symbol']}` | *المنصة:* `{signal_data['exchange']}`\n*سبب الدخول:* `{signal_data['reason']}`\n\n📈 *سعر الدخول المقترح:* `${signal_data['entry_price']:,.4f}`\n🎯 *جني الأرباح المقترح:* `${signal_data['take_profit']:,.4f}`\n🛑 *وقف الخسارة المقترح:* `${signal_data['stop_loss']:,.4f}`")
+    elif status_update in ['ناجحة', 'فاشلة']:
+        target_chat = TELEGRAM_SIGNAL_CHANNEL_ID
+        pnl_percent = (signal_data['pnl_usdt'] / signal_data['entry_value_usdt'] * 100) if signal_data.get('entry_value_usdt', 0) > 0 else 0
         icon, title, pnl_label = ("🎯", "هدف محقق!", "الربح") if status_update == 'ناجحة' else ("🛑", "تم تفعيل وقف الخسارة", "الخسارة")
         message = f"{icon} *{title}* {icon}\n\n*العملة:* `{signal_data['symbol']}` | *المنصة:* `{signal_data['exchange']}`\n*{pnl_label}:* `~${abs(signal_data.get('pnl_usdt', 0)):.2f} ({pnl_percent:+.2f}%)`"
     elif update_type == 'tsl_activation':
-        # Trailing stop loss activation is a control message, so it stays in the main chat
         message = f"🔒 *تأمين أرباح* 🔒\n\n*العملة:* `{signal_data['symbol']}`\nتم نقل وقف الخسارة إلى `${signal_data['stop_loss']:,.4f}`."
     
-    if message:
+    if not message: return
+
+    for attempt in range(3): # Try up to 3 times
         try:
             await bot.send_message(chat_id=target_chat, text=message, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
+            return # Success
+        except RetryAfter as e:
+            logging.warning(f"Flood control exceeded. Waiting for {e.retry_after} seconds (Attempt {attempt+1}/3).")
+            await asyncio.sleep(e.retry_after)
+        except TimedOut:
+            logging.warning(f"Request timed out. Waiting for 5 seconds before retrying (Attempt {attempt+1}/3).")
+            await asyncio.sleep(5)
         except Exception as e:
-            logging.error(f"Failed to send message to {target_chat}: {e}")
+            logging.error(f"Failed to send message to {target_chat} on attempt {attempt+1}: {e}")
+            await asyncio.sleep(2) # Wait briefly before the final retry
+    logging.error(f"Failed to send message to {target_chat} after 3 attempts.")
+
 
 async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -660,7 +668,6 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logging.error(f"Error in stats_command: {e}", exc_info=True)
         await update.message.reply_text("حدث خطأ أثناء جلب الإحصائيات.")
 
-# [FEATURE & FIX] New function to generate and send a daily performance report with Flood Control handling
 async def send_daily_report(context: ContextTypes.DEFAULT_TYPE):
     """Fetches today's closed trades, calculates stats, and sends a report to the signal channel."""
     today_str = datetime.now(EGYPT_TZ).strftime('%Y-%m-%d')
@@ -702,26 +709,11 @@ async def send_daily_report(context: ContextTypes.DEFAULT_TYPE):
             )
             logging.info(f"Daily report generated: Wins={wins}, Losses={losses}, PNL=${total_pnl:.2f}")
         
-        # [FIX] Implement retry logic for sending the message
-        try:
-            await context.bot.send_message(
-                chat_id=TELEGRAM_SIGNAL_CHANNEL_ID,
-                text=report_message,
-                parse_mode=ParseMode.MARKDOWN
-            )
-            return True # Indicate success
-        except RetryAfter as e:
-            logging.warning(f"Flood control exceeded. Waiting for {e.retry_after} seconds before retrying.")
-            await asyncio.sleep(e.retry_after)
-            await context.bot.send_message(
-                chat_id=TELEGRAM_SIGNAL_CHANNEL_ID,
-                text=report_message,
-                parse_mode=ParseMode.MARKDOWN
-            )
-            return True # Indicate success
+        await send_telegram_message(context.bot, {'custom_message': report_message, 'target_chat': TELEGRAM_SIGNAL_CHANNEL_ID})
+        return True # Indicate success
             
     except Exception as e:
-        logging.error(f"Failed to generate or send daily report: {e}", exc_info=True)
+        logging.error(f"Failed to generate daily report: {e}", exc_info=True)
         return False # Indicate failure
 
 async def daily_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
