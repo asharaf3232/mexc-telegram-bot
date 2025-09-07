@@ -513,13 +513,13 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
         failures = failure_counter[0]
         logging.info(f"Scan complete. Found: {total_signals}, Entered: {new_trades}, Opportunities: {opportunities}, Failures: {failures}.")
         
-        if total_signals > 0 or failures > 0:
-            summary_message = (f"🔹 *ملخص الفحص* 🔹\n\n"
-                                f"▫️ إجمالي الإشارات: *{total_signals}*\n"
-                                f"✅ صفقات جديدة: *{new_trades}*\n"
-                                f"💡 فرص إضافية: *{opportunities}*\n"
-                                f"⚠️ عملات فشل تحليلها: *{failures}*")
-            await send_telegram_message(context.bot, {'custom_message': summary_message, 'target_chat': TELEGRAM_CHAT_ID})
+        # [FIX] Always send a summary message to provide feedback, even if no signals or failures.
+        summary_message = (f"🔹 *ملخص الفحص* 🔹\n\n"
+                            f"▫️ إجمالي الإشارات: *{total_signals}*\n"
+                            f"✅ صفقات جديدة: *{new_trades}*\n"
+                            f"💡 فرص إضافية: *{opportunities}*\n"
+                            f"⚠️ عملات فشل تحليلها: *{failures}*")
+        await send_telegram_message(context.bot, {'custom_message': summary_message, 'target_chat': TELEGRAM_CHAT_ID})
             
         status['signals_found'] = new_trades + opportunities
         status['last_scan_end_time'] = datetime.now(EGYPT_TZ).strftime('%Y-%m-%d %H:%M:%S'); status['scan_in_progress'] = False
