@@ -500,116 +500,12 @@ async def check_market_regime():
         return df['close'].iloc[-1] > df['sma50'].iloc[-1]
     except Exception: return True
 
-async def fetch_historical_data_paginated(symbol, timeframe, limit):
-    logging.info(f"Fetching {limit} candles for {symbol}...")
-    exchange = ccxt.binance({ 'options': { 'defaultType': 'spot' } })
-    all_ohlcv = []
-    try:
-        since = None
-        while len(all_ohlcv) < limit:
-            fetch_limit = min(limit - len(all_ohlcv), 1000)
-            ohlcv = await exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=fetch_limit)
-            if not ohlcv: break
-            all_ohlcv = ohlcv + all_ohlcv
-            since = ohlcv[0][0] - 1
-
-        df = pd.DataFrame(all_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-        df.set_index('timestamp', inplace=True)
-        df.sort_index(inplace=True)
-        df = df.iloc[-limit:]
-        logging.info(f"Successfully fetched {len(df)} candles for {symbol}.")
-        return df
-    except Exception as e:
-        logging.error(f"Error fetching paginated data for {symbol}: {e}")
-        return None
-    finally:
-        await exchange.close()
-
-def analyze_backtest_results(trades, symbol, timeframe, limit):
-    if not trades: return (f"\n*لم يتم تنفيذ أي صفقات.*\n\n"
-                           f"قد يكون هذا بسبب أن شروط الماسحات النشطة لم تتحقق خلال الفترة المختارة. "
-                           f"جرب تعديل المعايير، أو تغيير الإطار الزمني، أو زيادة عدد الشموع.")
-    df_trades = pd.DataFrame(trades)
-    total_trades = len(df_trades); wins = df_trades[df_trades['status'] == 'Take Profit']; losses = df_trades[df_trades['status'] == 'Stop Loss']
-    win_rate = (len(wins) / total_trades) * 100 if total_trades > 0 else 0
-    total_pnl = df_trades['pnl'].sum(); avg_win = wins['pnl'].mean() if len(wins) > 0 else 0; avg_loss = losses['pnl'].mean() if len(losses) > 0 else 0
-    risk_reward_ratio = abs(avg_win / avg_loss) if avg_loss != 0 else float('inf')
-    df_trades['cumulative_pnl'] = df_trades['pnl'].cumsum(); df_trades['peak'] = df_trades['cumulative_pnl'].cummax()
-    df_trades['drawdown'] = df_trades['peak'] - df_trades['cumulative_pnl']; max_drawdown = df_trades['drawdown'].max()
-    report = (
-        f"--- 📜 *تقرير الاختبار التاريخي* ---\n\n*العملة:* `{symbol}` | *الإطار الزمني:* `{timeframe}` | *الشموع:* `{limit}`\n\n"
-        f"▫️ *إجمالي الصفقات:* `{total_trades}`\n✅ *الرابحة:* `{len(wins)}` | ❌ *الخاسرة:* `{len(losses)}`\n"
-        f"📈 *معدل النجاح:* `{win_rate:.2f}%`\n\n💰 *إجمالي الربح/الخسارة:* `{total_pnl:+.4f}`\n"
-        f"👍 *متوسط الربح:* `{avg_win:.4f}` | 👎 *متوسط الخسارة:* `{avg_loss:.4f}`\n"
-        f"⚖️ *متوسط المخاطرة/العائد:* `1:{risk_reward_ratio:.2f}`\n📉 *أقصى تراجع:* `-{max_drawdown:.4f}`"
-    )
-    return report
-
-# [MODIFIED] Major performance improvement for the backtesting function
-async def run_backtest_logic(update: Update, symbol: str, timeframe: str, limit: int):
-    try:
-        df = await fetch_historical_data_paginated(symbol, timeframe, limit)
-        if df is None or len(df) < 50:
-            await update.message.reply_text(f"لم أتمكن من جلب بيانات كافية لـ `{symbol}`.", parse_mode=ParseMode.MARKDOWN); return
-
-        trades = []; active_trade = None; settings = bot_data["settings"]
-
-        # --- التحسين: حساب جميع المؤشرات مرة واحدة فقط هنا ---
-        logging.info(f"Backtest for {symbol}: Calculating all indicators once...")
-        df.ta.atr(length=settings['atr_period'], append=True)
-        for scanner_name in settings['active_scanners']:
-            params = settings.get(scanner_name, {})
-            # استدعاء كل دالة تحليل لحساب المؤشرات الخاصة بها وإضافتها إلى df
-            if scanner_name == "momentum_breakout":
-                df.ta.vwap(append=True); df.ta.bbands(length=params['bbands_period'], std=params['bbands_stddev'], append=True); df.ta.macd(fast=params['macd_fast'], slow=params['macd_slow'], signal=params['macd_signal'], append=True); df.ta.rsi(length=params['rsi_period'], append=True)
-            elif scanner_name == "mean_reversion":
-                df.ta.bbands(length=params['bbands_period'], std=params['bbands_stddev'], append=True); df.ta.rsi(length=params['rsi_period'], append=True)
-            elif scanner_name == "breakout_squeeze":
-                 df.ta.bbands(length=params['bbands_period'], std=params['bbands_stddev'], append=True)
-                 bbu_col, bbl_col = f"BBU_{params['bbands_period']}_{params['bbands_stddev']}", f"BBL_{params['bbands_period']}_{params['bbands_stddev']}"
-                 if bbu_col in df.columns and bbl_col in df.columns: # التأكد من وجود الأعمدة
-                    df['bb_width'] = (df[bbu_col] - df[bbl_col]) / df['close'] * 100
-            elif scanner_name == "rsi_divergence" and SCIPY_AVAILABLE:
-                df.ta.rsi(length=params['rsi_period'], append=True)
-        logging.info(f"Backtest for {symbol}: Indicator calculation complete.")
-        # --- نهاية التحسين ---
-
-        for i in range(50, len(df)):
-            if active_trade:
-                current_candle = df.iloc[i]
-                if current_candle['low'] <= active_trade['stop_loss']: active_trade.update({'exit_price': active_trade['stop_loss'], 'status': 'Stop Loss'})
-                elif current_candle['high'] >= active_trade['take_profit']: active_trade.update({'exit_price': active_trade['take_profit'], 'status': 'Take Profit'})
-                if 'status' in active_trade:
-                    active_trade['pnl'] = (active_trade['exit_price'] - active_trade['entry_price']) * active_trade['size']
-                    trades.append(active_trade); active_trade = None; continue
-
-            if not active_trade:
-                # الآن، بدلاً من إعادة حساب المؤشرات، نمرر فقط جزء البيانات التاريخي للدوال
-                historical_df_slice = df.iloc[0:i]
-                for scanner_name in settings['active_scanners']:
-                    result = SCANNERS.get(scanner_name, lambda d, p: None)(historical_df_slice, settings.get(scanner_name, {}))
-                    if result and result.get('type') == 'long':
-                        entry_price = df.iloc[i-1]['close'] # استخدام الشمعة السابقة للدخول
-                        current_atr = df.iloc[i-1].get(f"ATRr_{settings['atr_period']}", 0)
-                        if pd.isna(current_atr) or current_atr == 0: continue
-                        risk_per_unit = current_atr * settings['atr_sl_multiplier']
-                        active_trade = {'entry_price': entry_price, 'stop_loss': entry_price - risk_per_unit, 'take_profit': entry_price + (risk_per_unit * settings['risk_reward_ratio']), 'size': 1, 'reason': result['reason']}
-                        break
-
-        report = analyze_backtest_results(trades, symbol, timeframe, limit)
-        await update.message.reply_text(report, parse_mode=ParseMode.MARKDOWN)
-    except Exception as e:
-        logging.error(f"Error during backtest execution: {e}", exc_info=True)
-        await update.message.reply_text(f"حدث خطأ أثناء تشغيل الاختبار: {e}")
-
 
 # --- أوامر ولوحات مفاتيح تليجرام --- #
 main_menu_keyboard = [
     ["📊 الإحصائيات", "📈 الصفقات النشطة"],
-    ["🧪 اختبار تاريخي", "⚙️ الإعدادات"],
-    ["👀 ماذا يجري في الخلفية؟", "ℹ️ مساعدة"],
-    ["🔬 فحص يدوي الآن"]
+    ["⚙️ الإعدادات", "👀 ماذا يجري في الخلفية؟"],
+    ["ℹ️ مساعدة", "🔬 فحص يدوي الآن"]
 ]
 settings_menu_keyboard = [["🎭 تفعيل/تعطيل الماسحات"], ["🔧 تعديل المعايير", "🔙 القائمة الرئيسية"]]
 
@@ -673,25 +569,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "`/scan` - إجراء فحص يدوي فوري\n"
         "`/report` - إرسال التقرير اليومي يدوياً\n"
         "`/check <ID>` - متابعة صفقة\n"
-        "`/backtest <S> <T> <C>` - إجراء اختبار تاريخي\n"
         "`/debug` - فحص حالة البوت التشخيصية",
         parse_mode=ParseMode.MARKDOWN
     )
-
-async def backtest_instructions_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("لإجراء اختبار تاريخي، استخدم الأمر `/backtest`.\n\n"
-        "🔹 *الصيغة:* `/backtest SYMBOL TIMEFRAME CANDLES`\n"
-        "🔹 *مثال:* `/backtest BTC/USDT 1h 4000`", parse_mode=ParseMode.MARKDOWN)
-
-async def backtest_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if len(context.args) != 3:
-        await backtest_instructions_command(update, context); return
-    try:
-        symbol, timeframe, limit = context.args[0].upper(), context.args[1], int(context.args[2])
-        await update.message.reply_text(f"⏳ جاري بدء الاختبار التاريخي لـ `{symbol}`... قد يستغرق هذا بعض الوقت.", parse_mode=ParseMode.MARKDOWN)
-        asyncio.create_task(run_backtest_logic(update, symbol, timeframe, limit))
-    except (ValueError, IndexError):
-        await update.message.reply_text("❌ خطأ في المدخلات. تأكد من أن عدد الشموع هو رقم صحيح.")
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -842,7 +722,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
 async def main_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     handlers = {
         "📊 الإحصائيات": stats_command, "📈 الصفقات النشطة": show_active_trades_command,
-        "ℹ️ مساعدة": help_command, "🧪 اختبار تاريخي": backtest_instructions_command,
+        "ℹ️ مساعدة": help_command,
         "⚙️ الإعدادات": show_settings_menu, "👀 ماذا يجري في الخلفية؟": background_status_command,
         "🔬 فحص يدوي الآن": scan_now_command,
         "🔧 تعديل المعايير": show_set_parameter_instructions, "🔙 القائمة الرئيسية": start_command,
@@ -891,7 +771,6 @@ def main():
     application.add_handler(CommandHandler("scan", scan_now_command))
     application.add_handler(CommandHandler("report", daily_report_command))
     application.add_handler(CommandHandler("check", check_trade_command))
-    application.add_handler(CommandHandler("backtest", backtest_command))
     application.add_handler(CommandHandler("debug", debug_command))
     application.add_handler(CallbackQueryHandler(button_callback_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, main_text_handler))
