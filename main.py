@@ -189,9 +189,20 @@ SCANNERS = {
 # --- الدوال الأساسية للبوت --- #
 async def initialize_exchanges():
     async def connect(ex_id):
-        exchange = getattr(ccxt, ex_id)({'enableRateLimit': True})
-        try: await exchange.load_markets(); bot_data["exchanges"][ex_id] = exchange; logging.info(f"Connected to {ex_id}")
-        except Exception as e: logging.error(f"Failed for {ex_id}: {e}"); await exchange.close()
+        # [SPOT MARKET FIX] Force CCXT to only load spot markets.
+        exchange = getattr(ccxt, ex_id)({
+            'enableRateLimit': True,
+            'options': {
+                'defaultType': 'spot',
+            },
+        })
+        try: 
+            await exchange.load_markets()
+            bot_data["exchanges"][ex_id] = exchange
+            logging.info(f"Connected to {ex_id} (spot markets only).")
+        except Exception as e: 
+            logging.error(f"Failed for {ex_id}: {e}")
+            await exchange.close()
     await asyncio.gather(*[connect(ex_id) for ex_id in EXCHANGES_TO_SCAN])
 
 async def aggregate_top_movers():
@@ -348,7 +359,12 @@ async def check_market_regime():
 
 async def fetch_historical_data_paginated(symbol, timeframe, limit):
     logging.info(f"Fetching {limit} candles for {symbol}...")
-    exchange = ccxt.binance()
+    # [SPOT MARKET FIX] Ensure backtests also use spot market data.
+    exchange = ccxt.binance({
+        'options': {
+            'defaultType': 'spot',
+        },
+    })
     all_ohlcv = []
     try:
         since = None
