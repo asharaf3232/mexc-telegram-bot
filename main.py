@@ -44,7 +44,7 @@ HIGHER_TIMEFRAME = '1h' # الإطار الزمني الأعلى للفلترة
 SCAN_INTERVAL_SECONDS = 900
 TRACK_INTERVAL_SECONDS = 120
 
-APP_ROOT = '.' 
+APP_ROOT = '.'
 DB_FILE = os.path.join(APP_ROOT, 'trading_bot_v19.db')
 SETTINGS_FILE = os.path.join(APP_ROOT, 'settings_v19.json')
 
@@ -140,22 +140,27 @@ def log_recommendation_to_db(signal):
         return None
 
 # --- وحدات المسح المتقدمة (Scanners) --- #
-def analyze_momentum_breakout(df, params):
-    # Calculate indicators without appending to avoid conflicts
-    vwap = df.ta.vwap(append=False)
-    bbands = df.ta.bbands(length=params['bbands_period'], std=params['bbands_stddev'], append=False)
-    macd = df.ta.macd(fast=params['macd_fast'], slow=params['macd_slow'], signal=params['macd_signal'], append=False)
-    rsi = df.ta.rsi(length=params['rsi_period'], append=False)
-    
-    # Join all results. This is safe and predictable.
-    df = df.join([vwap, bbands, macd, rsi])
+# [FINAL ROBUST FIX] New helper function to find column names without predicting the exact format.
+def find_col(df_columns, prefix):
+    """Finds a column in a list of columns that starts with a given prefix."""
+    try:
+        return next(col for col in df_columns if col.startswith(prefix))
+    except StopIteration:
+        return None
 
-    # Construct column names predictably
-    std_str = f"{params['bbands_stddev']:.1f}"
-    macd_col = f"MACD_{params['macd_fast']}_{params['macd_slow']}_{params['macd_signal']}"
-    macds_col = f"MACDs_{params['macd_fast']}_{params['macd_slow']}_{params['macd_signal']}"
-    bbu_col = f"BBU_{params['bbands_period']}_{std_str}"
-    rsi_col = f"RSI_{params['rsi_period']}"
+def analyze_momentum_breakout(df, params):
+    df.ta.vwap(append=True)
+    df.ta.bbands(length=params['bbands_period'], std=params['bbands_stddev'], append=True)
+    df.ta.macd(fast=params['macd_fast'], slow=params['macd_slow'], signal=params['macd_signal'], append=True)
+    df.ta.rsi(length=params['rsi_period'], append=True)
+
+    # Robustly find column names
+    macd_col = find_col(df.columns, f"MACD_{params['macd_fast']}_{params['macd_slow']}_{params['macd_signal']}")
+    macds_col = find_col(df.columns, f"MACDs_{params['macd_fast']}_{params['macd_slow']}_{params['macd_signal']}")
+    bbu_col = find_col(df.columns, f"BBU_{params['bbands_period']}_")
+    rsi_col = find_col(df.columns, f"RSI_{params['rsi_period']}")
+
+    if not all([macd_col, macds_col, bbu_col, rsi_col]): return None
     
     last, prev = df.iloc[-2], df.iloc[-3]
     
@@ -168,19 +173,16 @@ def analyze_momentum_breakout(df, params):
     return None
 
 def analyze_breakout_squeeze_pro(df, params):
-    bbands = df.ta.bbands(length=params['bbands_period'], std=params['bbands_stddev'], append=False)
-    kc = df.ta.kc(length=params['keltner_period'], scalar=params['keltner_atr_multiplier'], append=False)
-    obv = df.ta.obv(append=False)
+    df.ta.bbands(length=params['bbands_period'], std=params['bbands_stddev'], append=True)
+    df.ta.kc(length=params['keltner_period'], scalar=params['keltner_atr_multiplier'], append=True)
+    df.ta.obv(append=True)
+    
+    bbu_col = find_col(df.columns, f"BBU_{params['bbands_period']}_")
+    bbl_col = find_col(df.columns, f"BBL_{params['bbands_period']}_")
+    kcu_col = find_col(df.columns, f"KCUe_{params['keltner_period']}_")
+    kcl_col = find_col(df.columns, f"KCLEe_{params['keltner_period']}_")
 
-    df = df.join([bbands, kc, obv])
-    
-    std_str = f"{params['bbands_stddev']:.1f}"
-    atr_mult_str = f"{params['keltner_atr_multiplier']:.1f}"
-    
-    bbu_col = f"BBU_{params['bbands_period']}_{std_str}"
-    bbl_col = f"BBL_{params['bbands_period']}_{std_str}"
-    kcu_col = f"KCUe_{params['keltner_period']}_{atr_mult_str}"
-    kcl_col = f"KCLEe_{params['keltner_period']}_{atr_mult_str}"
+    if not all([bbu_col, bbl_col, kcu_col, kcl_col]): return None
 
     last, prev = df.iloc[-2], df.iloc[-3]
 
@@ -203,11 +205,10 @@ def find_divergence_points(series, lookback):
 
 def analyze_rsi_divergence(df, params):
     if not SCIPY_AVAILABLE: return None
-    rsi = df.ta.rsi(length=params['rsi_period'], append=False)
-    if rsi is None or rsi.isnull().all(): return None
-
-    df = df.join(rsi)
-    rsi_col = f"RSI_{params['rsi_period']}"
+    df.ta.rsi(length=params['rsi_period'], append=True)
+    
+    rsi_col = find_col(df.columns, f"RSI_{params['rsi_period']}")
+    if not rsi_col or df[rsi_col].isnull().all(): return None
 
     subset = df.iloc[-params['lookback_period']:].copy()
     price_troughs_idx, _ = find_divergence_points(-subset['low'], params['peak_trough_lookback'])
@@ -231,13 +232,10 @@ def analyze_rsi_divergence(df, params):
     return None
 
 def analyze_supertrend_pullback(df, params):
-    supertrend = df.ta.supertrend(length=params['atr_period'], multiplier=params['atr_multiplier'], append=False)
-    if supertrend is None or supertrend.empty: return None
+    df.ta.supertrend(length=params['atr_period'], multiplier=params['atr_multiplier'], append=True)
 
-    df = df.join(supertrend)
-    
-    mult_str = f"{params['atr_multiplier']:.1f}"
-    st_dir_col = f"SUPERTd_{params['atr_period']}_{mult_str}"
+    st_dir_col = find_col(df.columns, f"SUPERTd_{params['atr_period']}_")
+    if not st_dir_col: return None
     
     last, prev = df.iloc[-2], df.iloc[-3]
     
@@ -324,22 +322,26 @@ async def worker(queue, results_list, settings, failure_counter):
             df.ta.atr(length=settings['atr_period'], append=True)
 
             if settings.get('use_master_trend_filter'):
+                # [FIX] Handle cases where ADX is NaN, which can happen with illiquid pairs.
+                # A NaN value should be treated as a failed filter.
                 adx_col = find_col(df.columns, 'ADX_')
-                if not adx_col: continue
-                adx_value = df[adx_col].iloc[-2]
-                if adx_value < settings['master_adx_filter_level']:
-                    logging.info(f"ADX Filter: FAILED (ADX is {adx_value:.2f}, below {settings['master_adx_filter_level']}) for {symbol}")
+                adx_value = df[adx_col].iloc[-2] if adx_col and adx_col in df.columns else float('nan')
+                
+                if pd.isna(adx_value) or adx_value < settings['master_adx_filter_level']:
+                    reason = "is NaN" if pd.isna(adx_value) else f"is {adx_value:.2f}, below {settings['master_adx_filter_level']}"
+                    logging.info(f"ADX Filter: FAILED (ADX {reason}) for {symbol}")
                     continue
                 logging.info(f"ADX Filter: PASSED (ADX is {adx_value:.2f}) for {symbol}")
 
             for scanner_name in settings['active_scanners']:
-                analysis_result = SCANNERS.get(scanner_name)(df.copy(), settings.get(scanner_name, {}))
+                analysis_df = df.copy()
+                analysis_result = SCANNERS.get(scanner_name)(analysis_df, settings.get(scanner_name, {}))
                 
                 if analysis_result and analysis_result.get("type") == "long":
                     logging.info(f"SIGNAL FOUND for {symbol} via {scanner_name}")
                     entry_price = df.iloc[-2]['close']
                     current_atr_col = find_col(df.columns, f"ATRr_{settings['atr_period']}")
-                    if not current_atr_col: continue
+                    if not current_atr_col: continue # Should not happen as it's calculated before
                     current_atr = df.iloc[-2].get(current_atr_col, 0)
                     
                     if settings.get("use_dynamic_risk_management", False) and current_atr > 0 and not pd.isna(current_atr):
@@ -351,7 +353,7 @@ async def worker(queue, results_list, settings, failure_counter):
                     results_list.append(signal)
                     break 
         except Exception as e: 
-            logging.error(f"CRITICAL ERROR in worker for {symbol}: {e}", exc_info=True)
+            logging.error(f"CRITICAL ERROR in worker for {symbol}: {e}", exc_info=False)
             failure_counter[0] += 1
         finally:
             queue.task_done()
@@ -404,10 +406,10 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
     
     if total_signals > 0 or failures > 0:
         summary_message = (f"🔹 *ملخص الفحص* 🔹\n\n"
-                           f"▫️ إجمالي الإشارات: *{total_signals}*\n"
-                           f"✅ صفقات جديدة: *{new_trades}*\n"
-                           f"💡 فرص إضافية: *{opportunities}*\n"
-                           f"⚠️ عملات فشل تحليلها: *{failures}*")
+                            f"▫️ إجمالي الإشارات: *{total_signals}*\n"
+                            f"✅ صفقات جديدة: *{new_trades}*\n"
+                            f"💡 فرص إضافية: *{opportunities}*\n"
+                            f"⚠️ عملات فشل تحليلها: *{failures}*")
         await send_telegram_message(context.bot, {'custom_message': summary_message, 'target_chat': TELEGRAM_CHAT_ID})
         
     status['signals_found'] = new_trades + opportunities
@@ -519,7 +521,7 @@ async def check_market_regime():
 # --- أوامر ولوحات مفاتيح تليجرام --- #
 main_menu_keyboard = [["📊 الإحصائيات", "📈 الصفقات النشطة"], ["⚙️ الإعدادات", "👀 ماذا يجري في الخلفية؟"], ["ℹ️ مساعدة", "🔬 فحص يدوي الآن"]]
 settings_menu_keyboard = [["🎭 تفعيل/تعطيل الماسحات"], ["🔧 تعديل المعايير", "🔙 القائمة الرئيسية"]]
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("أهلاً بك في محاكي التداول المتقدم! (v19)", reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True))
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("أهلاً بك في محاكي التداول المتقدم! (v18)", reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True))
 async def scan_now_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if bot_data['status_snapshot'].get('scan_in_progress', False): await update.message.reply_text("⚠️ فحص آخر قيد التنفيذ حالياً."); return
     await update.message.reply_text("⏳ جاري بدء الفحص اليدوي...")
@@ -560,8 +562,8 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         total, active, successful, failed = sum(counts.values()), counts.get('نشطة', 0), counts.get('ناجحة', 0), counts.get('فاشلة', 0)
         closed = successful + failed; win_rate = (successful / closed * 100) if closed > 0 else 0; total_pnl = sum(pnl.values())
         stats_msg = (f"*📊 إحصائيات المحفظة*\n\n📈 *الرصيد الحالي:* `${bot_data['settings']['virtual_portfolio_balance_usdt']:.2f}`\n💰 *إجمالي الربح/الخسارة:* `${total_pnl:+.2f}`\n\n"
-                     f"- *إجمالي الصفقات:* `{total}` (`{active}` نشطة)\n- *الناجحة:* `{successful}` | *الربح:* `${pnl.get('ناجحة', 0):.2f}`\n"
-                     f"- *الفاشلة:* `{failed}` | *الخسارة:* `${abs(pnl.get('فاشلة', 0)):.2f}`\n- *معدل النجاح:* `{win_rate:.2f}%`")
+                       f"- *إجمالي الصفقات:* `{total}` (`{active}` نشطة)\n- *الناجحة:* `{successful}` | *الربح:* `${pnl.get('ناجحة', 0):.2f}`\n"
+                       f"- *الفاشلة:* `{failed}` | *الخسارة:* `${abs(pnl.get('فاشلة', 0)):.2f}`\n- *معدل النجاح:* `{win_rate:.2f}%`")
         await update.message.reply_text(stats_msg, parse_mode=ParseMode.MARKDOWN)
     except Exception as e: logging.error(f"Error in stats_command: {e}", exc_info=True); await update.message.reply_text("خطأ في جلب الإحصائيات.")
 async def send_daily_report(context: ContextTypes.DEFAULT_TYPE):
@@ -692,11 +694,11 @@ async def post_init(application: Application):
         report_time = dt_time(hour=23, minute=55, tzinfo=EGYPT_TZ)
         application.job_queue.run_daily(send_daily_report, time=report_time, name='daily_report')
         logging.info(f"Daily report scheduled for {report_time.strftime('%H:%M:%S')} {EGYPT_TZ}.")
-    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *محاكي التداول المتقدم (v19 - STABLE) جاهز للعمل!*", parse_mode=ParseMode.MARKDOWN)
+    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *محاكي التداول المتقدم (v18 - STABLE) جاهز للعمل!*", parse_mode=ParseMode.MARKDOWN)
     logging.info("Post-init finished.")
 async def post_shutdown(application: Application): await asyncio.gather(*[ex.close() for ex in bot_data["exchanges"].values()]); logging.info("Connections closed.")
 def main():
-    print("🚀 Starting Pro Trading Simulator Bot (v19 - STABLE)...")
+    print("🚀 Starting Pro Trading Simulator Bot (v18 - STABLE)...")
     load_settings(); init_database()
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).post_shutdown(post_shutdown).build()
     application.add_handler(CommandHandler("start", start_command)); application.add_handler(CommandHandler("scan", scan_now_command))
@@ -708,4 +710,3 @@ def main():
 if __name__ == '__main__':
     try: main()
     except Exception as e: logging.critical(f"Bot stopped due to a critical error: {e}", exc_info=True)
-
