@@ -285,11 +285,10 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
         conn.close()
     except Exception as e:
         logging.error(f"DB Error in perform_scan: {e}")
-        active_trades_count = 0
+        active_trades_count = settings.get("max_concurrent_trades", 5) # Assume limit is reached on DB error
 
-    if active_trades_count >= settings.get("max_concurrent_trades", 3):
-        logging.info("Skipping scan: Max concurrent trades limit reached."); status['scan_in_progress'] = False; return
-
+    # [NEW LOGIC] The scan will now always run to find opportunities.
+    # The check for max_concurrent_trades is moved inside the signal processing loop.
     if settings.get('market_regime_filter_enabled', True) and not await check_market_regime():
         logging.info("Skipping scan: Bearish market regime detected."); status['scan_in_progress'] = False; return
     
@@ -302,29 +301,50 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
 
     last_signal_time = bot_data['last_signal_time']
     for signal in signals:
-        if active_trades_count >= settings.get("max_concurrent_trades", 3): break
         symbol = signal['symbol']; current_time = time.time()
-        if symbol not in last_signal_time or (current_time - last_signal_time.get(symbol, 0)) > (SCAN_INTERVAL_SECONDS * 4):
-            trade_amount_usdt = settings["virtual_portfolio_balance_usdt"] * (settings["virtual_trade_size_percentage"] / 100)
-            signal.update({'quantity': trade_amount_usdt / signal['entry_price'], 'entry_value_usdt': trade_amount_usdt})
+        
+        # Skip if this is a repeated signal within the cooldown period
+        if symbol in last_signal_time and (current_time - last_signal_time.get(symbol, 0)) <= (SCAN_INTERVAL_SECONDS * 4):
+            continue
+
+        trade_amount_usdt = settings["virtual_portfolio_balance_usdt"] * (settings["virtual_trade_size_percentage"] / 100)
+        signal.update({'quantity': trade_amount_usdt / signal['entry_price'], 'entry_value_usdt': trade_amount_usdt})
+        
+        # Check if we are below the max trades limit
+        if active_trades_count < settings.get("max_concurrent_trades", 5):
+            # We can enter the trade. Log it and send the "New Trade" message.
             trade_id = log_recommendation_to_db(signal)
             if trade_id:
                 signal['trade_id'] = trade_id
                 await send_telegram_message(context.bot, signal, is_new=True)
-                last_signal_time[symbol] = current_time
-                status['signals_found'] += 1; active_trades_count += 1
+                active_trades_count += 1 # Increment local counter for this loop
+                status['signals_found'] += 1
+        else:
+            # We are at the limit. Send the "Opportunity" message instead.
+            await send_telegram_message(context.bot, signal, is_opportunity=True)
+            status['signals_found'] += 1 # Still count it as a found signal
+
+        last_signal_time[symbol] = current_time
             
     status['last_scan_end_time'] = datetime.now(EGYPT_TZ).strftime('%Y-%m-%d %H:%M:%S'); status['scan_in_progress'] = False
 
-async def send_telegram_message(bot, signal_data, is_new=False, status_update=None, update_type=None):
+async def send_telegram_message(bot, signal_data, is_new=False, is_opportunity=False, status_update=None, update_type=None):
     message = ""; keyboard = None
     if is_new:
         message = (f"✅ *محاكاة صفقة جديدة* ✅\n\n*العملة:* `{signal_data['symbol']}` | *المنصة:* `{signal_data['exchange']}`\n*رقم الصفقة:* `{signal_data['trade_id']}`\n\n*سبب الدخول:* `{signal_data['reason']}`\n*سعر الدخول:* `${signal_data['entry_price']:,.4f}`\n*قيمة الصفقة:* `${signal_data['entry_value_usdt']:,.2f}`\n\n🎯 *جني الأرباح:* `${signal_data['take_profit']:,.4f}`\n🛑 *وقف الخسارة:* `${signal_data['stop_loss']:,.4f}`")
         keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔁 متابعة حية", callback_data=f"check_{signal_data['trade_id']}")]])
+    elif is_opportunity:
+        message = (
+            f"💡 *فرصة تداول محتملة* 💡\n\n"
+            f"*العملة:* `{signal_data['symbol']}` | *المنصة:* `{signal_data['exchange']}`\n"
+            f"*سبب الدخول:* `{signal_data['reason']}`\n"
+            f"*سعر الدخول المقترح:* `${signal_data['entry_price']:,.4f}`\n\n"
+            f"*(ملاحظة: لم يتم الدخول في هذه الصفقة تلقائياً بسبب الوصول للحد الأقصى للصفقات النشطة)*"
+        )
     elif status_update in ['ناجحة', 'فاشلة']:
-        pnl_percent = (signal_data['pnl_usdt'] / signal_data['entry_value_usdt'] * 100) if signal_data['entry_value_usdt'] else 0
+        pnl_percent = (signal_data['pnl_usdt'] / signal_data['entry_value_usdt'] * 100) if signal_data.get('entry_value_usdt') and signal_data['entry_value_usdt'] > 0 else 0
         icon, title, pnl_label = ("🎯", "هدف محقق!", "الربح") if status_update == 'ناجحة' else ("🛑", "تم تفعيل وقف الخسارة", "الخسارة")
-        message = f"{icon} *{title}* {icon}\n\n*العملة:* `{signal_data['symbol']}`\n*{pnl_label}:* `~${abs(signal_data['pnl_usdt']):.2f} ({pnl_percent:+.2f}%)`"
+        message = f"{icon} *{title}* {icon}\n\n*العملة:* `{signal_data['symbol']}`\n*{pnl_label}:* `~${abs(signal_data.get('pnl_usdt', 0)):.2f} ({pnl_percent:+.2f}%)`"
     elif update_type == 'tsl_activation': message = f"🔒 *تأمين أرباح* 🔒\n\n*العملة:* `{signal_data['symbol']}`\nتم نقل وقف الخسارة إلى `${signal_data['stop_loss']:,.4f}`."
     if message:
         try:
