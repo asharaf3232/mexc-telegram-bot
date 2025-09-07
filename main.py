@@ -30,6 +30,9 @@ except ImportError:
 # --- الإعدادات الأساسية --- #
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', 'YOUR_BOT_TOKEN_HERE')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID', 'YOUR_CHAT_ID_HERE')
+# [FEATURE] Add a separate channel for signals. Fallback to the main chat ID if not set.
+TELEGRAM_SIGNAL_CHANNEL_ID = os.getenv('TELEGRAM_SIGNAL_CHANNEL_ID', TELEGRAM_CHAT_ID)
+
 
 if TELEGRAM_BOT_TOKEN == 'YOUR_BOT_TOKEN_HERE' or TELEGRAM_CHAT_ID == 'YOUR_CHAT_ID_HERE':
     print("FATAL ERROR: Please set your Telegram Token and Chat ID.")
@@ -42,8 +45,6 @@ SCAN_INTERVAL_SECONDS = 900
 TRACK_INTERVAL_SECONDS = 120
 
 # [FINAL PERSISTENCE FIX] Hardcode the data file paths to the application's root directory.
-# This ensures that all isolated processes in the cloud environment (main app, job queue workers)
-# read from and write to the exact same shared files, solving the "file not found" issue.
 APP_ROOT = '/app'
 DB_FILE = os.path.join(APP_ROOT, 'trading_bot_v12.db')
 SETTINGS_FILE = os.path.join(APP_ROOT, 'settings.json')
@@ -52,7 +53,6 @@ SETTINGS_FILE = os.path.join(APP_ROOT, 'settings.json')
 EGYPT_TZ = ZoneInfo("Africa/Cairo")
 
 # --- إعداد مسجل الأحداث (Logger) --- #
-# Log file will also be placed in the app root to be easily accessible.
 LOG_FILE = os.path.join(APP_ROOT, 'bot_v12.log')
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO, handlers=[logging.FileHandler(LOG_FILE), logging.StreamHandler()])
 logging.getLogger('httpx').setLevel(logging.WARNING)
@@ -132,6 +132,7 @@ def log_recommendation_to_db(signal):
         return None
 
 # --- وحدات المسح المتقدمة (Scanners) --- #
+# ... (Scanner functions remain unchanged) ...
 def analyze_momentum_breakout(df, params):
     try:
         df.ta.vwap(append=True); df.ta.bbands(length=params['bbands_period'], std=params['bbands_stddev'], append=True); df.ta.macd(fast=params['macd_fast'], slow=params['macd_slow'], signal=params['macd_signal'], append=True); df.ta.rsi(length=params['rsi_period'], append=True)
@@ -208,6 +209,7 @@ SCANNERS = {
 }
 
 # --- الدوال الأساسية للبوت --- #
+# ... (initialize_exchanges, aggregate_top_movers, worker remain unchanged) ...
 async def initialize_exchanges():
     async def connect(ex_id):
         # [SPOT MARKET FIX] Force CCXT to only load spot markets.
@@ -342,31 +344,36 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
 
 async def send_telegram_message(bot, signal_data, is_new=False, is_opportunity=False, status_update=None, update_type=None):
     message = ""; keyboard = None
+    target_chat = TELEGRAM_CHAT_ID # Default to the control chat
+
     if is_new:
-        message = (f"✅ *محاكاة صفقة جديدة* ✅\n\n*العملة:* `{signal_data['symbol']}` | *المنصة:* `{signal_data['exchange']}`\n*رقم الصفقة:* `{signal_data['trade_id']}`\n\n*سبب الدخول:* `{signal_data['reason']}`\n*سعر الدخول:* `${signal_data['entry_price']:,.4f}`\n*قيمة الصفقة:* `${signal_data['entry_value_usdt']:,.2f}`\n\n🎯 *جني الأرباح:* `${signal_data['take_profit']:,.4f}`\n🛑 *وقف الخسارة:* `${signal_data['stop_loss']:,.4f}`")
-        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔁 متابعة حية", callback_data=f"check_{signal_data['trade_id']}")]])
+        target_chat = TELEGRAM_SIGNAL_CHANNEL_ID # Send new trades to the signal channel
+        message = (f"✅ *توصية صفقة جديدة* ✅\n\n*العملة:* `{signal_data['symbol']}` | *المنصة:* `{signal_data['exchange']}`\n*سبب الدخول:* `{signal_data['reason']}`\n\n*سعر الدخول:* `${signal_data['entry_price']:,.4f}`\n*قيمة الصفقة:* `${signal_data['entry_value_usdt']:,.2f}`\n\n🎯 *جني الأرباح:* `${signal_data['take_profit']:,.4f}`\n🛑 *وقف الخسارة:* `${signal_data['stop_loss']:,.4f}`\n\n*للمتابعة، استخدم الأمر `/check {signal_data['trade_id']}` في البوت*")
     elif is_opportunity:
+        target_chat = TELEGRAM_SIGNAL_CHANNEL_ID # Send opportunities to the signal channel
         message = (
-            f"💡 *فرصة تداول محتملة (لم يتم الدخول)* 💡\n\n"
+            f"💡 *فرصة تداول محتملة* 💡\n\n"
             f"*العملة:* `{signal_data['symbol']}` | *المنصة:* `{signal_data['exchange']}`\n"
             f"*سبب الدخول:* `{signal_data['reason']}`\n\n"
             f"📈 *سعر الدخول المقترح:* `${signal_data['entry_price']:,.4f}`\n"
             f"🎯 *جني الأرباح المقترح:* `${signal_data['take_profit']:,.4f}`\n"
-            f"🛑 *وقف الخسارة المقترح:* `${signal_data['stop_loss']:,.4f}`\n\n"
-            f"*(ملاحظة: تم الوصول للحد الأقصى للصفقات النشطة)*"
+            f"🛑 *وقف الخسارة المقترح:* `${signal_data['stop_loss']:,.4f}`"
         )
     elif status_update in ['ناجحة', 'فاشلة']:
         pnl_percent = (signal_data['pnl_usdt'] / signal_data['entry_value_usdt'] * 100) if signal_data.get('entry_value_usdt') and signal_data['entry_value_usdt'] > 0 else 0
         icon, title, pnl_label = ("🎯", "هدف محقق!", "الربح") if status_update == 'ناجحة' else ("🛑", "تم تفعيل وقف الخسارة", "الخسارة")
         message = f"{icon} *{title}* {icon}\n\n*العملة:* `{signal_data['symbol']}`\n*{pnl_label}:* `~${abs(signal_data.get('pnl_usdt', 0)):.2f} ({pnl_percent:+.2f}%)`"
-    elif update_type == 'tsl_activation': message = f"🔒 *تأمين أرباح* 🔒\n\n*العملة:* `{signal_data['symbol']}`\nتم نقل وقف الخسارة إلى `${signal_data['stop_loss']:,.4f}`."
+    elif update_type == 'tsl_activation':
+        message = f"🔒 *تأمين أرباح* 🔒\n\n*العملة:* `{signal_data['symbol']}`\nتم نقل وقف الخسارة إلى `${signal_data['stop_loss']:,.4f}`."
+    
     if message:
         try:
-            await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
+            await bot.send_message(chat_id=target_chat, text=message, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
         except Exception as e:
-            logging.error(f"Failed to send message: {e}")
+            logging.error(f"Failed to send message to {target_chat}: {e}")
 
 async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
+    # ... (track_open_trades function remains unchanged) ...
     try:
         conn = sqlite3.connect(DB_FILE, timeout=10); conn.row_factory = sqlite3.Row; cursor = conn.cursor()
         cursor.execute("SELECT * FROM trades WHERE status = 'نشطة'")
@@ -431,6 +438,7 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
 
     if portfolio_pnl != 0.0: bot_data['settings']['virtual_portfolio_balance_usdt'] += portfolio_pnl; save_settings(); logging.info(f"Portfolio balance updated by ${portfolio_pnl:.2f}.")
 
+# ... (check_market_regime, fetch_historical_data_paginated, analyze_backtest_results, run_backtest_logic remain unchanged) ...
 async def check_market_regime():
     try:
         binance = bot_data["exchanges"].get('binance')
@@ -525,9 +533,7 @@ async def run_backtest_logic(update: Update, symbol: str, timeframe: str, limit:
     except Exception as e:
         logging.error(f"Error during backtest execution: {e}", exc_info=True)
         await update.message.reply_text(f"حدث خطأ أثناء تشغيل الاختبار: {e}")
-
 # --- أوامر ولوحات مفاتيح تليجرام --- #
-# [FEATURE] Add Manual Scan button
 main_menu_keyboard = [
     ["📊 الإحصائيات", "📈 الصفقات النشطة"],
     ["🧪 اختبار تاريخي", "⚙️ الإعدادات"],
@@ -538,15 +544,12 @@ settings_menu_keyboard = [["🎭 تفعيل/تعطيل الماسحات"], ["�
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("أهلاً بك في محاكي التداول المتقدم! (v12)", reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True))
 
-# [FEATURE] New command function for manual scan
 async def scan_now_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Triggers a manual scan if one is not already in progress."""
     if bot_data['status_snapshot'].get('scan_in_progress', False):
         await update.message.reply_text("⚠️ لا يمكن بدء فحص جديد، هناك فحص آخر قيد التنفيذ حالياً. يرجى الانتظار.")
         return
 
     await update.message.reply_text("⏳ جاري بدء الفحص اليدوي... سأرسل لك ملخصاً عند الانتهاء.")
-    # Run the scan in the background to not block the bot
     context.job_queue.run_once(perform_scan, 0, name='manual_scan')
 
 
@@ -571,7 +574,6 @@ async def show_scanners_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def toggle_scanner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     
-    # [BUG FIX] Correctly extract the full scanner name, even if it contains underscores.
     scanner_name = "_".join(query.data.split("_")[1:])
     
     active_scanners = bot_data["settings"].get("active_scanners", []).copy()
@@ -743,15 +745,21 @@ async def check_trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         logging.error(f"Error in check_trade_command: {e}", exc_info=True)
         await target_message.reply_text("حدث خطأ أثناء فحص الصفقة.")
 
-
 async def show_active_trades_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         conn = sqlite3.connect(DB_FILE, timeout=10); conn.row_factory = sqlite3.Row; cursor = conn.cursor()
-        cursor.execute("SELECT id, symbol FROM trades WHERE status = 'نشطة' ORDER BY id DESC")
+        # [FEATURE] Fetch more data to display on the buttons
+        cursor.execute("SELECT id, symbol, entry_value_usdt, exchange FROM trades WHERE status = 'نشطة' ORDER BY id DESC")
         active_trades = cursor.fetchall(); conn.close()
         if not active_trades:
             await update.message.reply_text("لا توجد صفقات نشطة حالياً."); return
-        keyboard = [[InlineKeyboardButton(f"ID: {t['id']} | {t['symbol']}", callback_data=f"check_{t['id']}")] for t in active_trades]
+        
+        # [FEATURE] Format the button text with the new information
+        keyboard = []
+        for t in active_trades:
+            button_text = f"#{t['id']} | {t['symbol']} | ${t['entry_value_usdt']:.2f} | {t['exchange']}"
+            keyboard.append([InlineKeyboardButton(button_text, callback_data=f"check_{t['id']}")])
+
         await update.message.reply_text("اختر صفقة لمتابعتها مباشرة:", reply_markup=InlineKeyboardMarkup(keyboard))
     except Exception as e:
         logging.error(f"Error in show_active_trades_command: {e}")
@@ -779,7 +787,7 @@ async def main_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📊 الإحصائيات": stats_command, "📈 الصفقات النشطة": show_active_trades_command,
         "ℹ️ مساعدة": help_command, "🧪 اختبار تاريخي": backtest_instructions_command,
         "⚙️ الإعدادات": show_settings_menu, "👀 ماذا يجري في الخلفية؟": background_status_command,
-        "🔬 فحص يدوي الآن": scan_now_command, # Handle new button
+        "🔬 فحص يدوي الآن": scan_now_command,
         "🔧 تعديل المعايير": show_set_parameter_instructions, "🔙 القائمة الرئيسية": start_command,
         "🔙 قائمة الإعدادات": show_settings_menu, "🎭 تفعيل/تعطيل الماسحات": show_scanners_menu
     }
@@ -800,7 +808,6 @@ async def main_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else: await update.message.reply_text(f"❌ خطأ: المعيار `{param}` غير موجود أو لا يمكن تعديله بهذه الطريقة.")
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Log Errors caused by Updates."""
     logging.error(f"Exception while handling an update: {context.error}", exc_info=context.error)
 
 async def post_init(application: Application):
@@ -831,7 +838,7 @@ def main():
     
     # Add handlers
     application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(CommandHandler("scan", scan_now_command)) # Add command for manual scan
+    application.add_handler(CommandHandler("scan", scan_now_command))
     application.add_handler(CommandHandler("check", check_trade_command))
     application.add_handler(CommandHandler("backtest", backtest_command))
     application.add_handler(CommandHandler("debug", debug_command))
