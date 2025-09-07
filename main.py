@@ -342,7 +342,8 @@ async def worker(queue, results_list, settings, failure_counter):
             ema_filters = settings['ema_trend_filter']
 
             # 1. Spread Filter
-            orderbook = await exchange.fetch_order_book(symbol, limit=1)
+            # [FIX] KuCoin requires a specific limit (e.g., 20 or 100). Using 20 for broader compatibility.
+            orderbook = await exchange.fetch_order_book(symbol, limit=20)
             if not orderbook or not orderbook['bids'] or not orderbook['asks']:
                 logging.info(f"Reject {symbol}: Could not fetch order book.")
                 continue
@@ -807,3 +808,4 @@ def main():
 if __name__ == '__main__':
     try: main()
     except Exception as e: logging.critical(f"Bot stopped due to a critical error: {e}", exc_info=True)
+
