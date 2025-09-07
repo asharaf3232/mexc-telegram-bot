@@ -434,21 +434,29 @@ async def show_scanners_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
     target_message = update.message or update.callback_query.message
     await target_message.reply_text("اختر الماسحات التي تريد تفعيلها أو تعطيلها:", reply_markup=get_scanners_keyboard())
 
-# [FIXED] The callback logic is now corrected to edit the message instead of deleting it.
+# [FINAL FIX] Rewrote the callback logic to be more robust and explicit.
 async def toggle_scanner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    # query.answer() is called in the main handler
     
     scanner_name = query.data.split("_")[1]
-    active_scanners = bot_data["settings"].get("active_scanners", [])
+    
+    # Explicitly copy the list to avoid any potential reference issues
+    active_scanners = bot_data["settings"].get("active_scanners", []).copy()
+    
+    # Toggle the scanner's status in the new list
     if scanner_name in active_scanners:
         active_scanners.remove(scanner_name)
+        logging.info(f"Deactivated scanner: {scanner_name}. New list: {active_scanners}")
     else:
         active_scanners.append(scanner_name)
+        logging.info(f"Activated scanner: {scanner_name}. New list: {active_scanners}")
+
+    # Assign the modified list back to the settings
     bot_data["settings"]["active_scanners"] = active_scanners
     save_settings()
 
-    # Edit the message with the new keyboard to reflect the change
+    # Edit the message with the updated keyboard
     try:
         await query.edit_message_text(
             text="اختر الماسحات التي تريد تفعيلها أو تعطيلها:",
@@ -456,10 +464,9 @@ async def toggle_scanner_callback(update: Update, context: ContextTypes.DEFAULT_
         )
     except BadRequest as e:
         if "Message is not modified" in str(e):
-            # This is not a critical error, just means the user clicked the same button twice fast.
-            logging.info("Ignored 'Message is not modified' error.")
+            logging.warning(f"User clicked '{scanner_name}' but message was not modified. State might be out of sync.")
         else:
-            # Re-raise other BadRequest errors.
+            logging.error(f"A BadRequest error occurred: {e}", exc_info=True)
             raise
 
 async def show_set_parameter_instructions(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -588,16 +595,25 @@ async def show_active_trades_command(update: Update, context: ContextTypes.DEFAU
     keyboard = [[InlineKeyboardButton(f"ID: {t['id']} | {t['symbol']}", callback_data=f"check_{t['id']}")] for t in active_trades]
     await update.message.reply_text("اختر صفقة لمتابعتها مباشرة:", reply_markup=InlineKeyboardMarkup(keyboard))
 
+# [FINAL FIX] Corrected the main callback handler for all inline buttons.
 async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query; 
-    if query.data.startswith("toggle_"): await toggle_scanner_callback(update, context)
-    elif query.data == "back_to_settings":
-        await query.answer()
+    query = update.callback_query
+    await query.answer()  # Answer immediately for better user experience
+
+    data = query.data
+    if data.startswith("toggle_"):
+        await toggle_scanner_callback(update, context)
+    elif data == "back_to_settings":
+        # First, delete the message with the inline keyboard
         await query.message.delete()
-        await show_settings_menu(update, context)
-    elif query.data.startswith("check_"): 
-        await query.answer()
-        await check_trade_command(update, context, trade_id_from_callback=int(query.data.split("_")[1]))
+        # Then, send a new message with the ReplyKeyboardMarkup for the settings menu
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text="اختر الإعداد الذي تريد تعديله:",
+            reply_markup=ReplyKeyboardMarkup(settings_menu_keyboard, resize_keyboard=True)
+        )
+    elif data.startswith("check_"):
+        await check_trade_command(update, context, trade_id_from_callback=int(data.split("_")[1]))
 
 async def main_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     handlers = {
@@ -670,3 +686,4 @@ def main():
 if __name__ == '__main__':
     try: main()
     except Exception as e: logging.critical(f"Bot stopped due to a critical error in __main__: {e}", exc_info=True)
+
