@@ -16,7 +16,7 @@ from zoneinfo import ZoneInfo
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
-from telegram.error import BadRequest
+from telegram.error import BadRequest, RetryAfter
 
 # [NEW] Gracefully handle optional scipy import
 try:
@@ -648,7 +648,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logging.error(f"Error in stats_command: {e}", exc_info=True)
         await update.message.reply_text("حدث خطأ أثناء جلب الإحصائيات.")
 
-# [FEATURE] New function to generate and send a daily performance report
+# [FEATURE & FIX] New function to generate and send a daily performance report with Flood Control handling
 async def send_daily_report(context: ContextTypes.DEFAULT_TYPE):
     """Fetches today's closed trades, calculates stats, and sends a report to the signal channel."""
     today_str = datetime.now(EGYPT_TZ).strftime('%Y-%m-%d')
@@ -689,19 +689,35 @@ async def send_daily_report(context: ContextTypes.DEFAULT_TYPE):
                 f"💰 *إجمالي الربح/الخسارة اليومي:* `${total_pnl:+.2f}`"
             )
             logging.info(f"Daily report generated: Wins={wins}, Losses={losses}, PNL=${total_pnl:.2f}")
-
-        await context.bot.send_message(
-            chat_id=TELEGRAM_SIGNAL_CHANNEL_ID,
-            text=report_message,
-            parse_mode=ParseMode.MARKDOWN
-        )
+        
+        # [FIX] Implement retry logic for sending the message
+        try:
+            await context.bot.send_message(
+                chat_id=TELEGRAM_SIGNAL_CHANNEL_ID,
+                text=report_message,
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return True # Indicate success
+        except RetryAfter as e:
+            logging.warning(f"Flood control exceeded. Waiting for {e.retry_after} seconds before retrying.")
+            await asyncio.sleep(e.retry_after)
+            await context.bot.send_message(
+                chat_id=TELEGRAM_SIGNAL_CHANNEL_ID,
+                text=report_message,
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return True # Indicate success
+            
     except Exception as e:
         logging.error(f"Failed to generate or send daily report: {e}", exc_info=True)
+        return False # Indicate failure
 
 async def daily_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Manual command to trigger the daily report."""
     await update.message.reply_text("⏳ جاري إعداد وإرسال التقرير اليومي إلى القناة...")
-    await send_daily_report(context)
+    success = await send_daily_report(context)
+    if success:
+        await update.message.reply_text("✅ تم إرسال التقرير بنجاح إلى القناة.")
 
 
 async def background_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
