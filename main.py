@@ -285,47 +285,59 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
         conn.close()
     except Exception as e:
         logging.error(f"DB Error in perform_scan: {e}")
-        active_trades_count = settings.get("max_concurrent_trades", 5) # Assume limit is reached on DB error
+        active_trades_count = settings.get("max_concurrent_trades", 5)
 
-    # [NEW LOGIC] The scan will now always run to find opportunities.
-    # The check for max_concurrent_trades is moved inside the signal processing loop.
     if settings.get('market_regime_filter_enabled', True) and not await check_market_regime():
         logging.info("Skipping scan: Bearish market regime detected."); status['scan_in_progress'] = False; return
     
     top_markets = await aggregate_top_movers()
-    if not top_markets: logging.info("No markets to scan."); status['scan_in_progress'] = False; return
+    if not top_markets: 
+        logging.info("Scan complete: No markets to scan.")
+        status['scan_in_progress'] = False; return
     
     queue = asyncio.Queue(); [await queue.put(market) for market in top_markets]
     signals = []; worker_tasks = [asyncio.create_task(worker(queue, signals, settings)) for _ in range(settings['concurrent_workers'])]
     await queue.join(); [task.cancel() for task in worker_tasks]
 
+    total_signals_found_this_run = 0
+    new_trades_entered = 0
+    opportunities_identified = 0
+    
     last_signal_time = bot_data['last_signal_time']
     for signal in signals:
         symbol = signal['symbol']; current_time = time.time()
         
-        # Skip if this is a repeated signal within the cooldown period
         if symbol in last_signal_time and (current_time - last_signal_time.get(symbol, 0)) <= (SCAN_INTERVAL_SECONDS * 4):
             continue
 
+        total_signals_found_this_run += 1
         trade_amount_usdt = settings["virtual_portfolio_balance_usdt"] * (settings["virtual_trade_size_percentage"] / 100)
         signal.update({'quantity': trade_amount_usdt / signal['entry_price'], 'entry_value_usdt': trade_amount_usdt})
         
-        # Check if we are below the max trades limit
         if active_trades_count < settings.get("max_concurrent_trades", 5):
-            # We can enter the trade. Log it and send the "New Trade" message.
             trade_id = log_recommendation_to_db(signal)
             if trade_id:
                 signal['trade_id'] = trade_id
                 await send_telegram_message(context.bot, signal, is_new=True)
-                active_trades_count += 1 # Increment local counter for this loop
-                status['signals_found'] += 1
+                active_trades_count += 1
+                new_trades_entered += 1
         else:
-            # We are at the limit. Send the "Opportunity" message instead.
             await send_telegram_message(context.bot, signal, is_opportunity=True)
-            status['signals_found'] += 1 # Still count it as a found signal
+            opportunities_identified += 1
 
         last_signal_time[symbol] = current_time
-            
+    
+    summary_log = f"Scan complete. Found: {total_signals_found_this_run}, Entered: {new_trades_entered}, Opportunities: {opportunities_identified}."
+    logging.info(summary_log)
+    
+    if total_signals_found_this_run > 0:
+        summary_message = (f"🔹 *ملخص الفحص* 🔹\n\n"
+                           f"▫️ إجمالي الإشارات التي تم العثور عليها: *{total_signals_found_this_run}*\n"
+                           f"✅ صفقات جديدة تم الدخول بها: *{new_trades_entered}*\n"
+                           f"💡 فرص إضافية تم تحديدها: *{opportunities_identified}*")
+        await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=summary_message, parse_mode=ParseMode.MARKDOWN)
+
+    status['signals_found'] = new_trades_entered + opportunities_identified
     status['last_scan_end_time'] = datetime.now(EGYPT_TZ).strftime('%Y-%m-%d %H:%M:%S'); status['scan_in_progress'] = False
 
 async def send_telegram_message(bot, signal_data, is_new=False, is_opportunity=False, status_update=None, update_type=None):
@@ -335,11 +347,13 @@ async def send_telegram_message(bot, signal_data, is_new=False, is_opportunity=F
         keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔁 متابعة حية", callback_data=f"check_{signal_data['trade_id']}")]])
     elif is_opportunity:
         message = (
-            f"💡 *فرصة تداول محتملة* 💡\n\n"
+            f"💡 *فرصة تداول محتملة (لم يتم الدخول)* 💡\n\n"
             f"*العملة:* `{signal_data['symbol']}` | *المنصة:* `{signal_data['exchange']}`\n"
-            f"*سبب الدخول:* `{signal_data['reason']}`\n"
-            f"*سعر الدخول المقترح:* `${signal_data['entry_price']:,.4f}`\n\n"
-            f"*(ملاحظة: لم يتم الدخول في هذه الصفقة تلقائياً بسبب الوصول للحد الأقصى للصفقات النشطة)*"
+            f"*سبب الدخول:* `{signal_data['reason']}`\n\n"
+            f"📈 *سعر الدخول المقترح:* `${signal_data['entry_price']:,.4f}`\n"
+            f"🎯 *جني الأرباح المقترح:* `${signal_data['take_profit']:,.4f}`\n"
+            f"🛑 *وقف الخسارة المقترح:* `${signal_data['stop_loss']:,.4f}`\n\n"
+            f"*(ملاحظة: تم الوصول للحد الأقصى للصفقات النشطة)*"
         )
     elif status_update in ['ناجحة', 'فاشلة']:
         pnl_percent = (signal_data['pnl_usdt'] / signal_data['entry_value_usdt'] * 100) if signal_data.get('entry_value_usdt') and signal_data['entry_value_usdt'] > 0 else 0
@@ -513,10 +527,29 @@ async def run_backtest_logic(update: Update, symbol: str, timeframe: str, limit:
         await update.message.reply_text(f"حدث خطأ أثناء تشغيل الاختبار: {e}")
 
 # --- أوامر ولوحات مفاتيح تليجرام --- #
-main_menu_keyboard = [["📊 الإحصائيات", "📈 الصفقات النشطة"], ["🧪 اختبار تاريخي", "⚙️ الإعدادات"], ["👀 ماذا يجري في الخلفية؟", "ℹ️ مساعدة"]]
+# [FEATURE] Add Manual Scan button
+main_menu_keyboard = [
+    ["📊 الإحصائيات", "📈 الصفقات النشطة"],
+    ["🧪 اختبار تاريخي", "⚙️ الإعدادات"],
+    ["👀 ماذا يجري في الخلفية؟", "ℹ️ مساعدة"],
+    ["🔬 فحص يدوي الآن"]
+]
 settings_menu_keyboard = [["🎭 تفعيل/تعطيل الماسحات"], ["🔧 تعديل المعايير", "🔙 القائمة الرئيسية"]]
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("أهلاً بك في محاكي التداول المتقدم! (v12)", reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True))
+
+# [FEATURE] New command function for manual scan
+async def scan_now_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Triggers a manual scan if one is not already in progress."""
+    if bot_data['status_snapshot'].get('scan_in_progress', False):
+        await update.message.reply_text("⚠️ لا يمكن بدء فحص جديد، هناك فحص آخر قيد التنفيذ حالياً. يرجى الانتظار.")
+        return
+
+    await update.message.reply_text("⏳ جاري بدء الفحص اليدوي... سأرسل لك ملخصاً عند الانتهاء.")
+    # Run the scan in the background to not block the bot
+    context.job_queue.run_once(perform_scan, 0, name='manual_scan')
+
+
 async def show_settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target_message = update.message or update.callback_query.message
     await target_message.reply_text("اختر الإعداد الذي تريد تعديله:", reply_markup=ReplyKeyboardMarkup(settings_menu_keyboard, resize_keyboard=True))
@@ -574,6 +607,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "*مساعدة البوت*\n"
         "`/start` - بدء\n"
+        "`/scan` - إجراء فحص يدوي فوري\n"
         "`/check <ID>` - متابعة صفقة\n"
         "`/backtest <S> <T> <C>` - إجراء اختبار تاريخي\n"
         "`/debug` - فحص حالة البوت التشخيصية",
@@ -745,6 +779,7 @@ async def main_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📊 الإحصائيات": stats_command, "📈 الصفقات النشطة": show_active_trades_command,
         "ℹ️ مساعدة": help_command, "🧪 اختبار تاريخي": backtest_instructions_command,
         "⚙️ الإعدادات": show_settings_menu, "👀 ماذا يجري في الخلفية؟": background_status_command,
+        "🔬 فحص يدوي الآن": scan_now_command, # Handle new button
         "🔧 تعديل المعايير": show_set_parameter_instructions, "🔙 القائمة الرئيسية": start_command,
         "🔙 قائمة الإعدادات": show_settings_menu, "🎭 تفعيل/تعطيل الماسحات": show_scanners_menu
     }
@@ -796,6 +831,7 @@ def main():
     
     # Add handlers
     application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("scan", scan_now_command)) # Add command for manual scan
     application.add_handler(CommandHandler("check", check_trade_command))
     application.add_handler(CommandHandler("backtest", backtest_command))
     application.add_handler(CommandHandler("debug", debug_command))
