@@ -811,7 +811,8 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     data = query.data
 
     if data.startswith("preset_"):
-        preset_name = data.split("_")[1]
+        # [FIX] Correctly split the preset name to handle multi-word names like "VERY_LAX"
+        preset_name = data.split("_", 1)[1]
         preset_data = PRESETS.get(preset_name)
         if preset_data:
             for key, value in preset_data.items():
@@ -824,14 +825,14 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
                 "PRO": "✅ تم تفعيل النمط الاحترافي (متوازن).",
                 "STRICT": "✅ تم تفعيل النمط المتشدد.",
                 "LAX": "✅ تم تفعيل النمط المتساهل.",
-                "VERY_LAX": "✅ تم تفعيل النمط فائق التساهل (لظروف السوق الهادئة)."
+                "VERY_LAX": "✅ تم تفعيل النمط فائق التساهل."
             }
             try:
                 await query.edit_message_text(preset_messages.get(preset_name, "✅ تم تطبيق النمط."), reply_markup=get_presets_keyboard())
             except BadRequest as e:
                 if "Message is not modified" not in str(e): raise
         else:
-            await query.message.reply_text("❌ نمط غير معروف.")
+            await query.message.reply_text(f"❌ نمط غير معروف: {preset_name}")
         return
 
     if data.startswith("toggle_"): await toggle_scanner_callback(update, context)
@@ -890,4 +891,5 @@ def main():
 if __name__ == '__main__':
     try: main()
     except Exception as e: logging.critical(f"Bot stopped due to a critical error: {e}", exc_info=True)
+
 
