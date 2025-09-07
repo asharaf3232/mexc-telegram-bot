@@ -243,7 +243,9 @@ async def aggregate_top_movers():
         and not any(k in t['symbol'].upper() for k in ['UP','DOWN','3L','3S','BEAR','BULL'])
     ]
 
+    # [FINAL LOGIC FIX] Sort the *filtered* list by volume, not the original one.
     sorted_tickers = sorted(usdt_tickers, key=lambda t: t.get('quoteVolume', 0) or 0, reverse=True)
+    
     # Use a dictionary to ensure each symbol is unique, preferring the one from the exchange with higher volume
     unique_symbols = {t['symbol']: {'exchange': t['exchange'], 'symbol': t['symbol']} for t in sorted_tickers}
     final_list = list(unique_symbols.values())[:bot_data["settings"]['top_n_symbols_by_volume']]
