@@ -40,10 +40,16 @@ EXCHANGES_TO_SCAN = ['binance', 'okx', 'bybit', 'kucoin', 'gate', 'mexc']
 TIMEFRAME = '15m'
 SCAN_INTERVAL_SECONDS = 900
 TRACK_INTERVAL_SECONDS = 120
-SETTINGS_FILE = 'settings.json'
 
-# [DATABASE FIX v2] Point to a shared temporary directory to resolve process isolation issues
-DB_FILE = '/tmp/trading_bot_v12.db'
+# [FINAL FIX] Create a dedicated data directory next to the script to ensure
+# all processes (main and background jobs) use the exact same shared files.
+script_dir = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(script_dir, 'bot_data')
+os.makedirs(DATA_DIR, exist_ok=True) # Create the directory if it doesn't exist
+
+DB_FILE = os.path.join(DATA_DIR, 'trading_bot_v12.db')
+SETTINGS_FILE = os.path.join(DATA_DIR, 'settings.json')
+
 
 EGYPT_TZ = ZoneInfo("Africa/Cairo")
 
@@ -84,11 +90,11 @@ def load_settings():
     else:
         bot_data["settings"] = DEFAULT_SETTINGS
         save_settings()
-    logging.info("Settings loaded successfully.")
+    logging.info(f"Settings loaded successfully from {SETTINGS_FILE}")
 
 def save_settings():
     with open(SETTINGS_FILE, 'w') as f: json.dump(bot_data["settings"], f, indent=4)
-    logging.info("Settings saved successfully.")
+    logging.info(f"Settings saved successfully to {SETTINGS_FILE}")
 
 # --- إدارة قاعدة البيانات --- #
 def init_database():
