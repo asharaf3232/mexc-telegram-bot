@@ -45,14 +45,14 @@ SCAN_INTERVAL_SECONDS = 900
 TRACK_INTERVAL_SECONDS = 120
 
 APP_ROOT = '.' 
-DB_FILE = os.path.join(APP_ROOT, 'trading_bot_v18.db')
-SETTINGS_FILE = os.path.join(APP_ROOT, 'settings_v18.json')
+DB_FILE = os.path.join(APP_ROOT, 'trading_bot_v19.db')
+SETTINGS_FILE = os.path.join(APP_ROOT, 'settings_v19.json')
 
 
 EGYPT_TZ = ZoneInfo("Africa/Cairo")
 
 # --- إعداد مسجل الأحداث (Logger) --- #
-LOG_FILE = os.path.join(APP_ROOT, 'bot_v18.log')
+LOG_FILE = os.path.join(APP_ROOT, 'bot_v19.log')
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO, handlers=[logging.FileHandler(LOG_FILE, 'w'), logging.StreamHandler()])
 logging.getLogger('httpx').setLevel(logging.WARNING)
 logging.getLogger('apscheduler').setLevel(logging.WARNING)
@@ -140,10 +140,13 @@ def log_recommendation_to_db(signal):
         return None
 
 # --- وحدات المسح المتقدمة (Scanners) --- #
-# [FINAL BUG FIX] This helper function now correctly formats floats to match pandas-ta's naming.
-def get_param_str(param_val):
-    """Converts a float or int to a string with one decimal place (e.g., 2.0 -> '2.0', 2 -> '2.0')."""
-    return f"{float(param_val):.1f}"
+# [FINAL ROBUST FIX] New helper function to find column names without predicting the exact format.
+def find_col(df_columns, prefix):
+    """Finds a column in a list of columns that starts with a given prefix."""
+    try:
+        return next(col for col in df_columns if col.startswith(prefix))
+    except StopIteration:
+        return None
 
 def analyze_momentum_breakout(df, params):
     df.ta.vwap(append=True)
@@ -151,11 +154,13 @@ def analyze_momentum_breakout(df, params):
     df.ta.macd(fast=params['macd_fast'], slow=params['macd_slow'], signal=params['macd_signal'], append=True)
     df.ta.rsi(length=params['rsi_period'], append=True)
 
-    std_str = get_param_str(params['bbands_stddev'])
-    macd_col = f"MACD_{params['macd_fast']}_{params['macd_slow']}_{params['macd_signal']}"
-    macds_col = f"MACDs_{params['macd_fast']}_{params['macd_slow']}_{params['macd_signal']}"
-    bbu_col = f"BBU_{params['bbands_period']}_{std_str}"
-    rsi_col = f"RSI_{params['rsi_period']}"
+    # Robustly find column names
+    macd_col = find_col(df.columns, f"MACD_{params['macd_fast']}_{params['macd_slow']}_{params['macd_signal']}")
+    macds_col = find_col(df.columns, f"MACDs_{params['macd_fast']}_{params['macd_slow']}_{params['macd_signal']}")
+    bbu_col = find_col(df.columns, f"BBU_{params['bbands_period']}_")
+    rsi_col = find_col(df.columns, f"RSI_{params['rsi_period']}")
+
+    if not all([macd_col, macds_col, bbu_col, rsi_col]): return None
     
     last, prev = df.iloc[-2], df.iloc[-3]
     
@@ -172,13 +177,12 @@ def analyze_breakout_squeeze_pro(df, params):
     df.ta.kc(length=params['keltner_period'], scalar=params['keltner_atr_multiplier'], append=True)
     df.ta.obv(append=True)
     
-    std_str = get_param_str(params['bbands_stddev'])
-    keltner_mult_str = get_param_str(params['keltner_atr_multiplier'])
+    bbu_col = find_col(df.columns, f"BBU_{params['bbands_period']}_")
+    bbl_col = find_col(df.columns, f"BBL_{params['bbands_period']}_")
+    kcu_col = find_col(df.columns, f"KCUe_{params['keltner_period']}_")
+    kcl_col = find_col(df.columns, f"KCLEe_{params['keltner_period']}_")
 
-    bbu_col = f"BBU_{params['bbands_period']}_{std_str}"
-    bbl_col = f"BBL_{params['bbands_period']}_{std_str}"
-    kcu_col = f"KCUe_{params['keltner_period']}_{keltner_mult_str}"
-    kcl_col = f"KCLEe_{params['keltner_period']}_{keltner_mult_str}"
+    if not all([bbu_col, bbl_col, kcu_col, kcl_col]): return None
 
     last, prev = df.iloc[-2], df.iloc[-3]
 
@@ -203,8 +207,8 @@ def analyze_rsi_divergence(df, params):
     if not SCIPY_AVAILABLE: return None
     df.ta.rsi(length=params['rsi_period'], append=True)
     
-    rsi_col = f"RSI_{params['rsi_period']}"
-    if df[rsi_col].isnull().all(): return None
+    rsi_col = find_col(df.columns, f"RSI_{params['rsi_period']}")
+    if not rsi_col or df[rsi_col].isnull().all(): return None
 
     subset = df.iloc[-params['lookback_period']:].copy()
     price_troughs_idx, _ = find_divergence_points(-subset['low'], params['peak_trough_lookback'])
@@ -230,8 +234,9 @@ def analyze_rsi_divergence(df, params):
 def analyze_supertrend_pullback(df, params):
     df.ta.supertrend(length=params['atr_period'], multiplier=params['atr_multiplier'], append=True)
 
-    mult_str = get_param_str(params['atr_multiplier'])
-    st_dir_col = f"SUPERTd_{params['atr_period']}_{mult_str}"
+    st_dir_col = find_col(df.columns, f"SUPERTd_{params['atr_period']}_")
+    if not st_dir_col: return None
+    
     last, prev = df.iloc[-2], df.iloc[-3]
     
     st_flipped_bullish = prev[st_dir_col] == -1 and last[st_dir_col] == 1
@@ -324,15 +329,16 @@ async def worker(queue, results_list, settings, failure_counter):
                 logging.info(f"ADX Filter: PASSED (ADX is {adx_value:.2f}) for {symbol}")
 
             for scanner_name in settings['active_scanners']:
-                # [ARCHITECTURAL FIX] Pass a copy of the dataframe to each scanner
-                # This ensures indicator calculations from one scanner don't interfere with another.
                 analysis_df = df.copy()
                 analysis_result = SCANNERS.get(scanner_name)(analysis_df, settings.get(scanner_name, {}))
                 
                 if analysis_result and analysis_result.get("type") == "long":
                     logging.info(f"SIGNAL FOUND for {symbol} via {scanner_name}")
                     entry_price = df.iloc[-2]['close']
-                    current_atr = df.iloc[-2].get(f"ATRr_{settings['atr_period']}", 0)
+                    current_atr_col = find_col(df.columns, f"ATRr_{settings['atr_period']}")
+                    if not current_atr_col: continue # Should not happen as it's calculated before
+                    current_atr = df.iloc[-2].get(current_atr_col, 0)
+                    
                     if settings.get("use_dynamic_risk_management", False) and current_atr > 0 and not pd.isna(current_atr):
                         risk_per_unit = current_atr * settings['atr_sl_multiplier']
                         stop_loss, take_profit = entry_price - risk_per_unit, entry_price + (risk_per_unit * settings['risk_reward_ratio'])
