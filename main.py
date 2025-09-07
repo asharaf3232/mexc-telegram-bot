@@ -45,14 +45,14 @@ SCAN_INTERVAL_SECONDS = 900
 TRACK_INTERVAL_SECONDS = 120
 
 APP_ROOT = '.' 
-DB_FILE = os.path.join(APP_ROOT, 'trading_bot_v17.db')
-SETTINGS_FILE = os.path.join(APP_ROOT, 'settings_v17.json')
+DB_FILE = os.path.join(APP_ROOT, 'trading_bot_v18.db')
+SETTINGS_FILE = os.path.join(APP_ROOT, 'settings_v18.json')
 
 
 EGYPT_TZ = ZoneInfo("Africa/Cairo")
 
 # --- إعداد مسجل الأحداث (Logger) --- #
-LOG_FILE = os.path.join(APP_ROOT, 'bot_v17.log')
+LOG_FILE = os.path.join(APP_ROOT, 'bot_v18.log')
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO, handlers=[logging.FileHandler(LOG_FILE, 'w'), logging.StreamHandler()])
 logging.getLogger('httpx').setLevel(logging.WARNING)
 logging.getLogger('apscheduler').setLevel(logging.WARNING)
@@ -140,8 +140,10 @@ def log_recommendation_to_db(signal):
         return None
 
 # --- وحدات المسح المتقدمة (Scanners) --- #
+# [FINAL BUG FIX] This helper function now correctly formats floats to match pandas-ta's naming.
 def get_param_str(param_val):
-    return str(int(param_val)) if isinstance(param_val, float) and param_val == int(param_val) else str(param_val)
+    """Converts a float or int to a string with one decimal place (e.g., 2.0 -> '2.0', 2 -> '2.0')."""
+    return f"{float(param_val):.1f}"
 
 def analyze_momentum_breakout(df, params):
     df.ta.vwap(append=True)
@@ -311,7 +313,6 @@ async def worker(queue, results_list, settings, failure_counter):
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms'); 
             df.set_index('timestamp', inplace=True)
             
-            # [REFACTOR] Calculate universal indicators once
             df.ta.adx(append=True)
             df.ta.atr(length=settings['atr_period'], append=True)
 
@@ -323,7 +324,11 @@ async def worker(queue, results_list, settings, failure_counter):
                 logging.info(f"ADX Filter: PASSED (ADX is {adx_value:.2f}) for {symbol}")
 
             for scanner_name in settings['active_scanners']:
-                analysis_result = SCANNERS.get(scanner_name)(df.copy(), settings.get(scanner_name, {}))
+                # [ARCHITECTURAL FIX] Pass a copy of the dataframe to each scanner
+                # This ensures indicator calculations from one scanner don't interfere with another.
+                analysis_df = df.copy()
+                analysis_result = SCANNERS.get(scanner_name)(analysis_df, settings.get(scanner_name, {}))
+                
                 if analysis_result and analysis_result.get("type") == "long":
                     logging.info(f"SIGNAL FOUND for {symbol} via {scanner_name}")
                     entry_price = df.iloc[-2]['close']
@@ -505,7 +510,7 @@ async def check_market_regime():
 # --- أوامر ولوحات مفاتيح تليجرام --- #
 main_menu_keyboard = [["📊 الإحصائيات", "📈 الصفقات النشطة"], ["⚙️ الإعدادات", "👀 ماذا يجري في الخلفية؟"], ["ℹ️ مساعدة", "🔬 فحص يدوي الآن"]]
 settings_menu_keyboard = [["🎭 تفعيل/تعطيل الماسحات"], ["🔧 تعديل المعايير", "🔙 القائمة الرئيسية"]]
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("أهلاً بك في محاكي التداول المتقدم! (v17)", reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True))
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("أهلاً بك في محاكي التداول المتقدم! (v18)", reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True))
 async def scan_now_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if bot_data['status_snapshot'].get('scan_in_progress', False): await update.message.reply_text("⚠️ فحص آخر قيد التنفيذ حالياً."); return
     await update.message.reply_text("⏳ جاري بدء الفحص اليدوي...")
@@ -678,11 +683,11 @@ async def post_init(application: Application):
         report_time = dt_time(hour=23, minute=55, tzinfo=EGYPT_TZ)
         application.job_queue.run_daily(send_daily_report, time=report_time, name='daily_report')
         logging.info(f"Daily report scheduled for {report_time.strftime('%H:%M:%S')} {EGYPT_TZ}.")
-    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *محاكي التداول المتقدم (v17 - STABLE) جاهز للعمل!*", parse_mode=ParseMode.MARKDOWN)
+    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *محاكي التداول المتقدم (v18 - STABLE) جاهز للعمل!*", parse_mode=ParseMode.MARKDOWN)
     logging.info("Post-init finished.")
 async def post_shutdown(application: Application): await asyncio.gather(*[ex.close() for ex in bot_data["exchanges"].values()]); logging.info("Connections closed.")
 def main():
-    print("🚀 Starting Pro Trading Simulator Bot (v17 - STABLE)...")
+    print("🚀 Starting Pro Trading Simulator Bot (v18 - STABLE)...")
     load_settings(); init_database()
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).post_shutdown(post_shutdown).build()
     application.add_handler(CommandHandler("start", start_command)); application.add_handler(CommandHandler("scan", scan_now_command))
