@@ -11,7 +11,7 @@ import json
 import re
 import time
 import sqlite3
-from datetime import datetime
+from datetime import datetime, time as dt_time
 from zoneinfo import ZoneInfo
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
@@ -132,7 +132,6 @@ def log_recommendation_to_db(signal):
         return None
 
 # --- وحدات المسح المتقدمة (Scanners) --- #
-# ... (Scanner functions remain unchanged) ...
 def analyze_momentum_breakout(df, params):
     try:
         df.ta.vwap(append=True); df.ta.bbands(length=params['bbands_period'], std=params['bbands_stddev'], append=True); df.ta.macd(fast=params['macd_fast'], slow=params['macd_slow'], signal=params['macd_signal'], append=True); df.ta.rsi(length=params['rsi_period'], append=True)
@@ -209,7 +208,6 @@ SCANNERS = {
 }
 
 # --- الدوال الأساسية للبوت --- #
-# ... (initialize_exchanges, aggregate_top_movers, worker remain unchanged) ...
 async def initialize_exchanges():
     async def connect(ex_id):
         # [SPOT MARKET FIX] Force CCXT to only load spot markets.
@@ -360,10 +358,13 @@ async def send_telegram_message(bot, signal_data, is_new=False, is_opportunity=F
             f"🛑 *وقف الخسارة المقترح:* `${signal_data['stop_loss']:,.4f}`"
         )
     elif status_update in ['ناجحة', 'فاشلة']:
+        # [FEATURE] Send closure reports to the signal channel for transparency
+        target_chat = TELEGRAM_SIGNAL_CHANNEL_ID
         pnl_percent = (signal_data['pnl_usdt'] / signal_data['entry_value_usdt'] * 100) if signal_data.get('entry_value_usdt') and signal_data['entry_value_usdt'] > 0 else 0
         icon, title, pnl_label = ("🎯", "هدف محقق!", "الربح") if status_update == 'ناجحة' else ("🛑", "تم تفعيل وقف الخسارة", "الخسارة")
-        message = f"{icon} *{title}* {icon}\n\n*العملة:* `{signal_data['symbol']}`\n*{pnl_label}:* `~${abs(signal_data.get('pnl_usdt', 0)):.2f} ({pnl_percent:+.2f}%)`"
+        message = f"{icon} *{title}* {icon}\n\n*العملة:* `{signal_data['symbol']}` | *المنصة:* `{signal_data['exchange']}`\n*{pnl_label}:* `~${abs(signal_data.get('pnl_usdt', 0)):.2f} ({pnl_percent:+.2f}%)`"
     elif update_type == 'tsl_activation':
+        # Trailing stop loss activation is a control message, so it stays in the main chat
         message = f"🔒 *تأمين أرباح* 🔒\n\n*العملة:* `{signal_data['symbol']}`\nتم نقل وقف الخسارة إلى `${signal_data['stop_loss']:,.4f}`."
     
     if message:
@@ -373,7 +374,6 @@ async def send_telegram_message(bot, signal_data, is_new=False, is_opportunity=F
             logging.error(f"Failed to send message to {target_chat}: {e}")
 
 async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
-    # ... (track_open_trades function remains unchanged) ...
     try:
         conn = sqlite3.connect(DB_FILE, timeout=10); conn.row_factory = sqlite3.Row; cursor = conn.cursor()
         cursor.execute("SELECT * FROM trades WHERE status = 'نشطة'")
@@ -438,7 +438,6 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
 
     if portfolio_pnl != 0.0: bot_data['settings']['virtual_portfolio_balance_usdt'] += portfolio_pnl; save_settings(); logging.info(f"Portfolio balance updated by ${portfolio_pnl:.2f}.")
 
-# ... (check_market_regime, fetch_historical_data_paginated, analyze_backtest_results, run_backtest_logic remain unchanged) ...
 async def check_market_regime():
     try:
         binance = bot_data["exchanges"].get('binance')
@@ -533,6 +532,7 @@ async def run_backtest_logic(update: Update, symbol: str, timeframe: str, limit:
     except Exception as e:
         logging.error(f"Error during backtest execution: {e}", exc_info=True)
         await update.message.reply_text(f"حدث خطأ أثناء تشغيل الاختبار: {e}")
+
 # --- أوامر ولوحات مفاتيح تليجرام --- #
 main_menu_keyboard = [
     ["📊 الإحصائيات", "📈 الصفقات النشطة"],
@@ -610,6 +610,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "*مساعدة البوت*\n"
         "`/start` - بدء\n"
         "`/scan` - إجراء فحص يدوي فوري\n"
+        "`/report` - إرسال التقرير اليومي يدوياً\n"
         "`/check <ID>` - متابعة صفقة\n"
         "`/backtest <S> <T> <C>` - إجراء اختبار تاريخي\n"
         "`/debug` - فحص حالة البوت التشخيصية",
@@ -646,6 +647,62 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logging.error(f"Error in stats_command: {e}", exc_info=True)
         await update.message.reply_text("حدث خطأ أثناء جلب الإحصائيات.")
+
+# [FEATURE] New function to generate and send a daily performance report
+async def send_daily_report(context: ContextTypes.DEFAULT_TYPE):
+    """Fetches today's closed trades, calculates stats, and sends a report to the signal channel."""
+    today_str = datetime.now(EGYPT_TZ).strftime('%Y-%m-%d')
+    logging.info(f"Generating daily report for {today_str}...")
+
+    try:
+        conn = sqlite3.connect(DB_FILE, timeout=10)
+        cursor = conn.cursor()
+        # Fetch status and PNL for trades closed on the current date
+        cursor.execute("SELECT status, pnl_usdt FROM trades WHERE DATE(closed_at) = ?", (today_str,))
+        closed_today = cursor.fetchall()
+        conn.close()
+
+        if not closed_today:
+            report_message = f"🗓️ *التقرير اليومي ليوم {today_str}*\n\nلم يتم إغلاق أي صفقات اليوم."
+            logging.info("No trades closed today. Sending empty report.")
+        else:
+            wins = 0
+            losses = 0
+            total_pnl = 0.0
+            for status, pnl in closed_today:
+                if status == 'ناجحة':
+                    wins += 1
+                else: # 'فاشلة'
+                    losses += 1
+                if pnl is not None:
+                    total_pnl += pnl
+            
+            total_trades = wins + losses
+            win_rate = (wins / total_trades * 100) if total_trades > 0 else 0
+            
+            report_message = (
+                f"🗓️ *التقرير اليومي ليوم {today_str}*\n\n"
+                f"▫️ *إجمالي الصفقات المغلقة:* `{total_trades}`\n"
+                f"✅ *الرابحة:* `{wins}`\n"
+                f"❌ *الخاسرة:* `{losses}`\n\n"
+                f"📈 *معدل النجاح اليومي:* `{win_rate:.2f}%`\n"
+                f"💰 *إجمالي الربح/الخسارة اليومي:* `${total_pnl:+.2f}`"
+            )
+            logging.info(f"Daily report generated: Wins={wins}, Losses={losses}, PNL=${total_pnl:.2f}")
+
+        await context.bot.send_message(
+            chat_id=TELEGRAM_SIGNAL_CHANNEL_ID,
+            text=report_message,
+            parse_mode=ParseMode.MARKDOWN
+        )
+    except Exception as e:
+        logging.error(f"Failed to generate or send daily report: {e}", exc_info=True)
+
+async def daily_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Manual command to trigger the daily report."""
+    await update.message.reply_text("⏳ جاري إعداد وإرسال التقرير اليومي إلى القناة...")
+    await send_daily_report(context)
+
 
 async def background_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status = bot_data['status_snapshot']; next_scan_time = "N/A"
@@ -684,6 +741,8 @@ async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.job_queue:
         scan_job = context.job_queue.get_jobs_by_name('perform_scan')
         track_job = context.job_queue.get_jobs_by_name('track_open_trades')
+        report_job = context.job_queue.get_jobs_by_name('daily_report') # Check for the new job
+
         if scan_job:
             next_run = scan_job[0].next_t.astimezone(EGYPT_TZ).strftime('%H:%M:%S')
             report_parts.append(f"  - `مهمة الفحص`: ✅ نشطة (التالي: {next_run})")
@@ -695,6 +754,13 @@ async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             report_parts.append(f"  - `مهمة المتابعة`: ✅ نشطة (التالي: {next_run})")
         else:
              report_parts.append("  - `مهمة المتابعة`: ❌ غير نشطة!")
+
+        if report_job:
+            next_run = report_job[0].next_t.astimezone(EGYPT_TZ).strftime('%Y-%m-%d %H:%M:%S')
+            report_parts.append(f"  - `مهمة التقرير اليومي`: ✅ نشطة (التالي: {next_run})")
+        else:
+            report_parts.append("  - `مهمة التقرير اليومي`: ❌ غير نشطة!")
+
     else:
         report_parts.append("  - ❌ لم يتم العثور على مدير المهام!")
 
@@ -744,6 +810,7 @@ async def check_trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     except Exception as e:
         logging.error(f"Error in check_trade_command: {e}", exc_info=True)
         await target_message.reply_text("حدث خطأ أثناء فحص الصفقة.")
+
 
 async def show_active_trades_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -822,7 +889,12 @@ async def post_init(application: Application):
         logging.info("Job queue found. Scheduling jobs.")
         application.job_queue.run_repeating(perform_scan, interval=SCAN_INTERVAL_SECONDS, first=10, name='perform_scan')
         application.job_queue.run_repeating(track_open_trades, interval=TRACK_INTERVAL_SECONDS, first=20, name='track_open_trades')
-        logging.info("Jobs scheduled successfully.")
+        
+        # [FEATURE] Schedule the daily report job
+        report_time = dt_time(hour=23, minute=55, tzinfo=EGYPT_TZ)
+        application.job_queue.run_daily(send_daily_report, time=report_time, name='daily_report')
+        logging.info(f"Daily report scheduled for {report_time.strftime('%H:%M:%S')} {EGYPT_TZ}.")
+
     else:
         logging.error("Job queue not found in application object!")
     
@@ -839,6 +911,7 @@ def main():
     # Add handlers
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("scan", scan_now_command))
+    application.add_handler(CommandHandler("report", daily_report_command)) # Add command for manual report
     application.add_handler(CommandHandler("check", check_trade_command))
     application.add_handler(CommandHandler("backtest", backtest_command))
     application.add_handler(CommandHandler("debug", debug_command))
