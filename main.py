@@ -45,18 +45,40 @@ SCAN_INTERVAL_SECONDS = 900
 TRACK_INTERVAL_SECONDS = 120
 
 APP_ROOT = '.'
-DB_FILE = os.path.join(APP_ROOT, 'trading_bot_v20.db')
-SETTINGS_FILE = os.path.join(APP_ROOT, 'settings_v20.json')
+DB_FILE = os.path.join(APP_ROOT, 'trading_bot_v21.db')
+SETTINGS_FILE = os.path.join(APP_ROOT, 'settings_v21.json')
 
 
 EGYPT_TZ = ZoneInfo("Africa/Cairo")
 
 # --- إعداد مسجل الأحداث (Logger) --- #
-LOG_FILE = os.path.join(APP_ROOT, 'bot_v20.log')
+LOG_FILE = os.path.join(APP_ROOT, 'bot_v21.log')
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO, handlers=[logging.FileHandler(LOG_FILE, 'w'), logging.StreamHandler()])
 logging.getLogger('httpx').setLevel(logging.WARNING)
 logging.getLogger('apscheduler').setLevel(logging.WARNING)
 logging.getLogger('telegram').setLevel(logging.WARNING)
+
+
+# --- [IMPROVEMENT] Preset Configurations ---
+PRESET_PRO = {
+  "liquidity_filters": {"min_quote_volume_24h_usd": 1000000, "max_spread_percent": 0.45, "rvol_period": 18, "min_rvol": 1.5},
+  "volatility_filters": {"atr_period_for_filter": 14, "min_atr_percent": 0.85},
+  "ema_trend_filter": {"enabled": True, "ema_period": 200},
+  "min_tp_sl_filter": {"min_tp_percent": 1.1, "min_sl_percent": 0.6}
+}
+PRESET_LAX = {
+  "liquidity_filters": {"min_quote_volume_24h_usd": 400000, "max_spread_percent": 1.3, "rvol_period": 12, "min_rvol": 1.1},
+  "volatility_filters": {"atr_period_for_filter": 10, "min_atr_percent": 0.3},
+  "ema_trend_filter": {"enabled": False, "ema_period": 200},
+  "min_tp_sl_filter": {"min_tp_percent": 0.4, "min_sl_percent": 0.2}
+}
+PRESET_STRICT = {
+  "liquidity_filters": {"min_quote_volume_24h_usd": 2500000, "max_spread_percent": 0.22, "rvol_period": 25, "min_rvol": 2.2},
+  "volatility_filters": {"atr_period_for_filter": 20, "min_atr_percent": 1.4},
+  "ema_trend_filter": {"enabled": True, "ema_period": 200},
+  "min_tp_sl_filter": {"min_tp_percent": 1.8, "min_sl_percent": 0.9}
+}
+PRESETS = {"PRO": PRESET_PRO, "LAX": PRESET_LAX, "STRICT": PRESET_STRICT}
 
 
 # --- متغيرات الحالة العامة للبوت --- #
@@ -629,8 +651,8 @@ async def check_market_regime():
 
 # --- أوامر ولوحات مفاتيح تليجرام --- #
 main_menu_keyboard = [["📊 الإحصائيات", "📈 الصفقات النشطة"], ["⚙️ الإعدادات", "👀 ماذا يجري في الخلفية؟"], ["ℹ️ مساعدة", "🔬 فحص يدوي الآن"]]
-settings_menu_keyboard = [["🎭 تفعيل/تعطيل الماسحات"], ["🔧 تعديل المعايير", "🔙 القائمة الرئيسية"]]
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("أهلاً بك في محاكي التداول المتقدم! (v20 - Stable)", reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True))
+settings_menu_keyboard = [["🎭 تفعيل/تعطيل الماسحات", "🏁 أنماط جاهزة"], ["🔧 تعديل المعايير", "🔙 القائمة الرئيسية"]]
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("أهلاً بك في محاكي التداول المتقدم! (v21 - Presets)", reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True))
 async def scan_now_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if bot_data['status_snapshot'].get('scan_in_progress', False): await update.message.reply_text("⚠️ فحص آخر قيد التنفيذ حالياً."); return
     await update.message.reply_text("⏳ جاري بدء الفحص اليدوي...")
@@ -638,11 +660,26 @@ async def scan_now_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def show_settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target_message = update.message or update.callback_query.message
     await target_message.reply_text("اختر الإعداد الذي تريد تعديله:", reply_markup=ReplyKeyboardMarkup(settings_menu_keyboard, resize_keyboard=True))
+
 def get_scanners_keyboard():
     active_scanners = bot_data["settings"].get("active_scanners", [])
     keyboard = [[InlineKeyboardButton(f"{'✅' if name in active_scanners else '❌'} {name}", callback_data=f"toggle_{name}")] for name in SCANNERS.keys()]
     keyboard.append([InlineKeyboardButton("🔙 العودة للإعدادات", callback_data="back_to_settings")])
     return InlineKeyboardMarkup(keyboard)
+
+# [IMPROVEMENT] New keyboard and handler for presets
+def get_presets_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🚦 احترافية (متوازنة)", callback_data="preset_PRO")],
+        [InlineKeyboardButton("🎯 متشددة", callback_data="preset_STRICT")],
+        [InlineKeyboardButton("🌙 متساهلة", callback_data="preset_LAX")],
+        [InlineKeyboardButton("🔙 العودة للإعدادات", callback_data="back_to_settings")]
+    ])
+
+async def show_presets_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    target_message = update.message or update.callback_query.message
+    await target_message.reply_text("اختر نمط إعدادات جاهز لتطبيقه على الفلاتر:", reply_markup=get_presets_keyboard())
+
 async def show_scanners_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target_message = update.message or update.callback_query.message
     await target_message.reply_text("اختر الماسحات لتفعيلها أو تعطيلها:", reply_markup=get_scanners_keyboard())
@@ -658,7 +695,7 @@ async def toggle_scanner_callback(update: Update, context: ContextTypes.DEFAULT_
         if "Message is not modified" not in str(e): raise
 async def show_set_parameter_instructions(update: Update, context: ContextTypes.DEFAULT_TYPE):
     params_list = "\n".join([f"`{k}`" for k, v in bot_data["settings"].items() if not isinstance(v, (dict, list))])
-    message = (f"لتعديل معيار، أرسل:\n`اسم_المعيار = قيمة_جديدة`\n\n*المعايير القابلة للتعديل:*\n{params_list}\n\n(لتعديل المعايير المتداخلة مثل `min_rvol`، تواصل مع المطور).")
+    message = (f"لتعديل معيار، أرسل:\n`اسم_المعيار = قيمة_جديدة`\n\n*المعايير القابلة للتعديل:*\n{params_list}\n\n(لتعديل المعايير المتداخلة مثل `min_rvol`، استخدم قائمة 'أنماط جاهزة' أو تواصل مع المطور).")
     await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN, reply_markup=ReplyKeyboardMarkup([["🔙 قائمة الإعدادات"]], resize_keyboard=True))
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("*مساعدة البوت*\n`/start` - بدء\n`/scan` - فحص يدوي\n`/report` - تقرير يومي\n`/check <ID>` - متابعة صفقة\n`/debug` - فحص الحالة", parse_mode=ParseMode.MARKDOWN)
@@ -764,6 +801,30 @@ async def show_active_trades_command(update: Update, context: ContextTypes.DEFAU
 async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query; await query.answer()
     data = query.data
+
+    if data.startswith("preset_"):
+        preset_name = data.split("_")[1]
+        preset_data = PRESETS.get(preset_name)
+        if preset_data:
+            for key, value in preset_data.items():
+                if key in bot_data["settings"] and isinstance(bot_data["settings"][key], dict):
+                    bot_data["settings"][key].update(value)
+                else:
+                    bot_data["settings"][key] = value
+            save_settings()
+            preset_messages = {
+                "PRO": "✅ تم تفعيل النمط الاحترافي (متوازن).",
+                "STRICT": "✅ تم تفعيل النمط المتشدد.",
+                "LAX": "✅ تم تفعيل النمط المتساهل."
+            }
+            try:
+                await query.edit_message_text(preset_messages.get(preset_name, "✅ تم تطبيق النمط."), reply_markup=get_presets_keyboard())
+            except BadRequest as e:
+                if "Message is not modified" not in str(e): raise
+        else:
+            await query.message.reply_text("❌ نمط غير معروف.")
+        return
+
     if data.startswith("toggle_"): await toggle_scanner_callback(update, context)
     elif data == "back_to_settings":
         await query.message.delete()
@@ -774,7 +835,8 @@ async def main_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📊 الإحصائيات": stats_command, "📈 الصفقات النشطة": show_active_trades_command, "ℹ️ مساعدة": help_command,
         "⚙️ الإعدادات": show_settings_menu, "👀 ماذا يجري في الخلفية؟": background_status_command, "🔬 فحص يدوي الآن": scan_now_command,
         "🔧 تعديل المعايير": show_set_parameter_instructions, "🔙 القائمة الرئيسية": start_command,
-        "🔙 قائمة الإعدادات": show_settings_menu, "🎭 تفعيل/تعطيل الماسحات": show_scanners_menu
+        "🔙 قائمة الإعدادات": show_settings_menu, "🎭 تفعيل/تعطيل الماسحات": show_scanners_menu,
+        "🏁 أنماط جاهزة": show_presets_menu,
     }
     text = update.message.text
     if text in handlers: await handlers[text](update, context)
@@ -803,11 +865,11 @@ async def post_init(application: Application):
         report_time = dt_time(hour=23, minute=55, tzinfo=EGYPT_TZ)
         application.job_queue.run_daily(send_daily_report, time=report_time, name='daily_report')
         logging.info(f"Daily report scheduled for {report_time.strftime('%H:%M:%S')} {EGYPT_TZ}.")
-    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *محاكي التداول المتقدم (v20 - Stable) جاهز للعمل!*", parse_mode=ParseMode.MARKDOWN)
+    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *محاكي التداول المتقدم (v21 - Presets) جاهز للعمل!*", parse_mode=ParseMode.MARKDOWN)
     logging.info("Post-init finished.")
 async def post_shutdown(application: Application): await asyncio.gather(*[ex.close() for ex in bot_data["exchanges"].values()]); logging.info("Connections closed.")
 def main():
-    print("🚀 Starting Pro Trading Simulator Bot (v20 - Stable)...")
+    print("🚀 Starting Pro Trading Simulator Bot (v21 - Presets)...")
     load_settings(); init_database()
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).post_shutdown(post_shutdown).build()
     application.add_handler(CommandHandler("start", start_command)); application.add_handler(CommandHandler("scan", scan_now_command))
