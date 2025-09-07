@@ -42,9 +42,8 @@ SCAN_INTERVAL_SECONDS = 900
 TRACK_INTERVAL_SECONDS = 120
 SETTINGS_FILE = 'settings.json'
 
-# [DATABASE FIX] Use an absolute path for the database file to ensure consistency
-script_dir = os.path.dirname(os.path.abspath(__file__))
-DB_FILE = os.path.join(script_dir, 'trading_bot_v12.db')
+# [DATABASE FIX v2] Point to a shared temporary directory to resolve process isolation issues
+DB_FILE = '/tmp/trading_bot_v12.db'
 
 EGYPT_TZ = ZoneInfo("Africa/Cairo")
 
