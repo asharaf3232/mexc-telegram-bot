@@ -45,14 +45,14 @@ SCAN_INTERVAL_SECONDS = 900
 TRACK_INTERVAL_SECONDS = 120
 
 APP_ROOT = '.'
-DB_FILE = os.path.join(APP_ROOT, 'trading_bot_v23.db')
-SETTINGS_FILE = os.path.join(APP_ROOT, 'settings_v23.json')
+DB_FILE = os.path.join(APP_ROOT, 'trading_bot_v24.db')
+SETTINGS_FILE = os.path.join(APP_ROOT, 'settings_v24.json')
 
 
 EGYPT_TZ = ZoneInfo("Africa/Cairo")
 
 # --- إعداد مسجل الأحداث (Logger) --- #
-LOG_FILE = os.path.join(APP_ROOT, 'bot_v23.log')
+LOG_FILE = os.path.join(APP_ROOT, 'bot_v24.log')
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO, handlers=[logging.FileHandler(LOG_FILE, 'w'), logging.StreamHandler()])
 logging.getLogger('httpx').setLevel(logging.WARNING)
 logging.getLogger('apscheduler').setLevel(logging.WARNING)
@@ -78,7 +78,6 @@ PRESET_STRICT = {
   "ema_trend_filter": {"enabled": True, "ema_period": 200},
   "min_tp_sl_filter": {"min_tp_percent": 1.8, "min_sl_percent": 0.9}
 }
-# [NEW] Added a very relaxed preset for quiet market conditions
 PRESET_VERY_LAX = {
   "liquidity_filters": {"min_quote_volume_24h_usd": 200000, "max_spread_percent": 2.0, "rvol_period": 10, "min_rvol": 0.8},
   "volatility_filters": {"atr_period_for_filter": 10, "min_atr_percent": 0.2},
@@ -90,7 +89,6 @@ PRESETS = {"PRO": PRESET_PRO, "LAX": PRESET_LAX, "STRICT": PRESET_STRICT, "VERY_
 
 # --- متغيرات الحالة العامة للبوت --- #
 bot_data = {"exchanges": {}, "last_signal_time": {}, "settings": {}, "status_snapshot": {"last_scan_start_time": "N/A", "last_scan_end_time": "N/A", "markets_found": 0, "signals_found": 0, "active_trades_count": 0, "scan_in_progress": False}}
-# [FIX] Add a lock to prevent concurrent scan executions
 scan_lock = asyncio.Lock()
 
 # --- إدارة الإعدادات --- #
@@ -109,7 +107,9 @@ DEFAULT_SETTINGS = {
     "stablecoin_filter": {"exclude_bases": ["USDT","USDC","DAI","FDUSD","TUSD","USDE","PYUSD","GUSD","EURT","USDJ"]},
     "ema_trend_filter": {"enabled": True, "ema_period": 200},
     "min_tp_sl_filter": {"min_tp_percent": 1.0, "min_sl_percent": 0.5},
-    "min_signal_strength": 1
+    "min_signal_strength": 1,
+    # [IMPROVEMENT] Track the active preset
+    "active_preset_name": "Default"
 }
 
 
@@ -660,7 +660,7 @@ async def check_market_regime():
 # --- أوامر ولوحات مفاتيح تليجرام --- #
 main_menu_keyboard = [["📊 الإحصائيات", "📈 الصفقات النشطة"], ["⚙️ الإعدادات", "👀 ماذا يجري في الخلفية؟"], ["ℹ️ مساعدة", "🔬 فحص يدوي الآن"]]
 settings_menu_keyboard = [["🎭 تفعيل/تعطيل الماسحات", "🏁 أنماط جاهزة"], ["🔧 تعديل المعايير", "🔙 القائمة الرئيسية"]]
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("أهلاً بك في محاكي التداول المتقدم! (v23 - Presets+)", reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True))
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("أهلاً بك في محاكي التداول المتقدم! (v24 - Professional Grade)", reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True))
 async def scan_now_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if bot_data['status_snapshot'].get('scan_in_progress', False): await update.message.reply_text("⚠️ فحص آخر قيد التنفيذ حالياً."); return
     await update.message.reply_text("⏳ جاري بدء الفحص اليدوي...")
@@ -703,7 +703,7 @@ async def toggle_scanner_callback(update: Update, context: ContextTypes.DEFAULT_
         if "Message is not modified" not in str(e): raise
 async def show_set_parameter_instructions(update: Update, context: ContextTypes.DEFAULT_TYPE):
     params_list = "\n".join([f"`{k}`" for k, v in bot_data["settings"].items() if not isinstance(v, (dict, list))])
-    message = (f"لتعديل معيار، أرسل:\n`اسم_المعيار = قيمة_جديدة`\n\n*المعايير القابلة للتعديل:*\n{params_list}\n\n(لتعديل المعايير المتداخلة مثل `min_rvol`، استخدم قائمة 'أنماط جاهزة' أو تواصل مع المطور).")
+    message = (f"لتعديل معيار، أرسل:\n`اسم_المعيار = قيمة_جديدة`\n\n*المعايير القابلة للتعديل:*\n{params_list}\n\n(لتعديل المعايير المتداخلة مثل `min_rvol`، استخدم قائمة 'أنماط جاهزة').")
     await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN, reply_markup=ReplyKeyboardMarkup([["🔙 قائمة الإعدادات"]], resize_keyboard=True))
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("*مساعدة البوت*\n`/start` - بدء\n`/scan` - فحص يدوي\n`/report` - تقرير يومي\n`/check <ID>` - متابعة صفقة\n`/debug` - فحص الحالة", parse_mode=ParseMode.MARKDOWN)
@@ -715,9 +715,15 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         counts = {s: c for s, c, p in stats_data}; pnl = {s: (p or 0) for s, c, p in stats_data}
         total, active, successful, failed = sum(counts.values()), counts.get('نشطة', 0), counts.get('ناجحة', 0), counts.get('فاشلة', 0)
         closed = successful + failed; win_rate = (successful / closed * 100) if closed > 0 else 0; total_pnl = sum(pnl.values())
-        stats_msg = (f"*📊 إحصائيات المحفظة*\n\n📈 *الرصيد الحالي:* `${bot_data['settings']['virtual_portfolio_balance_usdt']:.2f}`\n💰 *إجمالي الربح/الخسارة:* `${total_pnl:+.2f}`\n\n"
-                       f"- *إجمالي الصفقات:* `{total}` (`{active}` نشطة)\n- *الناجحة:* `{successful}` | *الربح:* `${pnl.get('ناجحة', 0):.2f}`\n"
-                       f"- *الفاشلة:* `{failed}` | *الخسارة:* `${abs(pnl.get('فاشلة', 0)):.2f}`\n- *معدل النجاح:* `{win_rate:.2f}%`")
+        preset_name = bot_data["settings"].get("active_preset_name", "N/A")
+        stats_msg = (f"*📊 إحصائيات المحفظة*\n\n"
+                       f"📈 *الرصيد الحالي:* `${bot_data['settings']['virtual_portfolio_balance_usdt']:.2f}`\n"
+                       f"💰 *إجمالي الربح/الخسارة:* `${total_pnl:+.2f}`\n"
+                       f"⚙️ *النمط الحالي:* `{preset_name}`\n\n"
+                       f"- *إجمالي الصفقات:* `{total}` (`{active}` نشطة)\n"
+                       f"- *الناجحة:* `{successful}` | *الربح:* `${pnl.get('ناجحة', 0):.2f}`\n"
+                       f"- *الفاشلة:* `{failed}` | *الخسارة:* `${abs(pnl.get('فاشلة', 0)):.2f}`\n"
+                       f"- *معدل النجاح:* `{win_rate:.2f}%`")
         await update.message.reply_text(stats_msg, parse_mode=ParseMode.MARKDOWN)
     except Exception as e: logging.error(f"Error in stats_command: {e}", exc_info=True); await update.message.reply_text("خطأ في جلب الإحصائيات.")
 async def send_daily_report(context: ContextTypes.DEFAULT_TYPE):
@@ -757,6 +763,8 @@ async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn = sqlite3.connect(DB_FILE, timeout=10); cursor = conn.cursor(); cursor.execute("SELECT COUNT(*) FROM trades"); count = cursor.fetchone()[0]; conn.close()
         parts.append(f"✅ *قاعدة البيانات:* متصلة ({count} trades).")
     except Exception as e: parts.append(f"❌ *قاعدة البيانات:* فشل! ({e})")
+    preset_name = bot_data["settings"].get("active_preset_name", "N/A")
+    parts.append(f"\n*⚙️ النمط النشط:* `{preset_name}`")
     exchanges_status = [f"  - `{ex_id}`: {'✅' if ex_id in bot_data.get('exchanges', {}) else '❌'}" for ex_id in EXCHANGES_TO_SCAN]
     parts.append("\n*📡 حالة الاتصال بالمنصات:*"); parts.extend(exchanges_status)
     parts.append("\n*⚙️ حالة المهام الخلفية:*")
@@ -811,7 +819,6 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     data = query.data
 
     if data.startswith("preset_"):
-        # [FIX] Correctly split the preset name to handle multi-word names like "VERY_LAX"
         preset_name = data.split("_", 1)[1]
         preset_data = PRESETS.get(preset_name)
         if preset_data:
@@ -820,19 +827,28 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
                     bot_data["settings"][key].update(value)
                 else:
                     bot_data["settings"][key] = value
+            bot_data["settings"]["active_preset_name"] = preset_name
             save_settings()
-            preset_messages = {
-                "PRO": "✅ تم تفعيل النمط الاحترافي (متوازن).",
-                "STRICT": "✅ تم تفعيل النمط المتشدد.",
-                "LAX": "✅ تم تفعيل النمط المتساهل.",
-                "VERY_LAX": "✅ تم تفعيل النمط فائق التساهل."
-            }
+            
+            # [IMPROVEMENT] Create a detailed confirmation message
+            preset_titles = {"PRO": "احترافي (متوازن)", "STRICT": "متشدد", "LAX": "متساهل", "VERY_LAX": "فائق التساهل"}
+            lf = preset_data['liquidity_filters']
+            vf = preset_data['volatility_filters']
+            
+            confirmation_text = (
+                f"✅ *تم تفعيل النمط: {preset_titles.get(preset_name, preset_name)}*\n\n"
+                f"*أهم القيم المطبقة:*\n"
+                f"`- min_rvol: {lf['min_rvol']}`\n"
+                f"`- max_spread: {lf['max_spread_percent']}%`\n"
+                f"`- min_atr: {vf['min_atr_percent']}%`"
+            )
+            
             try:
-                await query.edit_message_text(preset_messages.get(preset_name, "✅ تم تطبيق النمط."), reply_markup=get_presets_keyboard())
+                await query.edit_message_text(confirmation_text, parse_mode=ParseMode.MARKDOWN, reply_markup=get_presets_keyboard())
             except BadRequest as e:
                 if "Message is not modified" not in str(e): raise
         else:
-            await query.message.reply_text(f"❌ نمط غير معروف: {preset_name}")
+            await query.message.reply_text("❌ نمط غير معروف.")
         return
 
     if data.startswith("toggle_"): await toggle_scanner_callback(update, context)
@@ -859,8 +875,11 @@ async def main_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if isinstance(current, bool): new = value_str.lower() in ['true', '1', 'yes', 'on']
                 elif isinstance(current, int): new = int(value_str)
                 else: new = float(value_str)
-                settings[param] = new; save_settings()
-                await update.message.reply_text(f"✅ تم تحديث `{param}` إلى `{new}`.")
+                settings[param] = new
+                # [IMPROVEMENT] Mark preset as custom if a parameter is changed manually
+                settings["active_preset_name"] = "Custom"
+                save_settings()
+                await update.message.reply_text(f"✅ تم تحديث `{param}` إلى `{new}`.\n*تنبيه: تم تغيير النمط إلى 'مخصص'.*")
             except ValueError: await update.message.reply_text(f"❌ قيمة غير صالحة.")
         else: await update.message.reply_text(f"❌ خطأ: المعيار `{param}` غير موجود.")
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None: logging.error(f"Exception: {context.error}", exc_info=context.error)
@@ -875,11 +894,11 @@ async def post_init(application: Application):
         report_time = dt_time(hour=23, minute=55, tzinfo=EGYPT_TZ)
         application.job_queue.run_daily(send_daily_report, time=report_time, name='daily_report')
         logging.info(f"Daily report scheduled for {report_time.strftime('%H:%M:%S')} {EGYPT_TZ}.")
-    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *محاكي التداول المتقدم (v23 - Presets+) جاهز للعمل!*", parse_mode=ParseMode.MARKDOWN)
+    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *محاكي التداول المتقدم (v24 - Professional Grade) جاهز للعمل!*", parse_mode=ParseMode.MARKDOWN)
     logging.info("Post-init finished.")
 async def post_shutdown(application: Application): await asyncio.gather(*[ex.close() for ex in bot_data["exchanges"].values()]); logging.info("Connections closed.")
 def main():
-    print("🚀 Starting Pro Trading Simulator Bot (v23 - Presets+)...")
+    print("🚀 Starting Pro Trading Simulator Bot (v24 - Professional Grade)...")
     load_settings(); init_database()
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).post_shutdown(post_shutdown).build()
     application.add_handler(CommandHandler("start", start_command)); application.add_handler(CommandHandler("scan", scan_now_command))
