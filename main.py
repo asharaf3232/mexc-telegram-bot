@@ -671,10 +671,53 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
         if not original_trade: continue
         status = result['status']
         if status in ['ناجحة', 'فاشلة']:
-            pnl = (result['exit_price'] - original_trade['entry_price']) * original_trade['quantity']; portfolio_pnl += pnl
+            # --- START: Replacement Code ---
+            pnl_usdt = (result['exit_price'] - original_trade['entry_price']) * original_trade['quantity']
+            pnl_percent = (pnl_usdt / original_trade['entry_value_usdt'] * 100) if original_trade.get('entry_value_usdt', 0) > 0 else 0
+            portfolio_pnl += pnl_usdt
             closed_at_str = datetime.now(EGYPT_TZ).strftime('%Y-%m-%d %H:%M:%S')
-            updates_to_db.append(("UPDATE trades SET status=?, exit_price=?, closed_at=?, exit_value_usdt=?, pnl_usdt=? WHERE id=?", (status, result['exit_price'], closed_at_str, result['exit_price'] * original_trade['quantity'], pnl, result['id'])))
-            await send_telegram_message(context.bot, {**original_trade, **result, 'pnl_usdt': pnl}, status_update=status)
+
+            updates_to_db.append((
+                "UPDATE trades SET status=?, exit_price=?, closed_at=?, exit_value_usdt=?, pnl_usdt=? WHERE id=?",
+                (status, result['exit_price'], closed_at_str, result['exit_price'] * original_trade['quantity'], pnl_usdt, result['id'])
+            ))
+            # Calculate duration
+            duration_str = "N/A"
+            try:
+                entry_time = datetime.strptime(original_trade['timestamp'], '%Y-%m-%d %H:%M:%S')
+                close_time = datetime.now()
+                duration = close_time - entry_time
+                days, remainder = divmod(duration.total_seconds(), 86400)
+                hours, remainder = divmod(remainder, 3600)
+                minutes, _ = divmod(remainder, 60)
+                parts = []
+                if int(days) > 0: parts.append(f"{int(days)} يوم")
+                if int(hours) > 0: parts.append(f"{int(hours)} ساعة")
+                if int(minutes) > 0 or not parts: parts.append(f"{int(minutes)} دقيقة")
+                duration_str = "، ".join(parts)
+            except Exception as e:
+                logging.warning(f"Could not calculate duration for trade #{original_trade['id']}: {e}")
+            # Build the detailed message
+            icon = "✅" if pnl_usdt >= 0 else "❌"
+            reason_str = "Take Profit Hit" if status == 'ناجحة' else "Stop Loss Hit"
+            reason_icon = "🎯" if status == 'ناجحة' else "🛑"
+            def format_price(price): return f"{price:,.8f}" if price < 0.01 else f"{price:,.4f}"
+
+            message = (
+                f"{icon} **تم إغلاق الصفقة #{original_trade['id']}** {icon}\n\n"
+                f"{reason_icon} **السبب:** *{reason_str}*\n"
+                f"━━━━━━━━━━━━━━\n"
+                f"▫️ **العملة:** `{original_trade['symbol']}`\n"
+                f"▫️ **الاستراتيجية:** `{original_trade.get('reason', 'N/A')}`\n"
+                f"▫️ **مدة الصفقة:** `{duration_str}`\n"
+                f"━━━━━━━━━━━━━━\n"
+                f"📈 **سعر الدخول:** `{format_price(original_trade['entry_price'])}`\n"
+                f"📉 **سعر الخروج:** `{format_price(result['exit_price'])}`\n"
+                f"💰 **الربح/الخسارة:** **`${pnl_usdt:+.2f}`** (`{pnl_percent:+.2f}%`)"
+            )
+            # Send the new detailed message
+            await send_telegram_message(context.bot, {'custom_message': message, 'target_chat': TELEGRAM_SIGNAL_CHANNEL_ID})
+            # --- END: Replacement Code ---
         elif status == 'update_tsl':
             updates_to_db.append(("UPDATE trades SET stop_loss=?, highest_price=?, trailing_sl_active=? WHERE id=?", (result['new_sl'], result['highest_price'], True, result['id'])))
             await send_telegram_message(context.bot, {**original_trade, **result}, update_type='tsl_activation')
@@ -1123,4 +1166,3 @@ def main():
 if __name__ == '__main__':
     try: main()
     except Exception as e: logging.critical(f"Bot stopped due to a critical error: {e}", exc_info=True)
-
