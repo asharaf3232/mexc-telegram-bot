@@ -3,3 +3,4 @@ pandas
 pandas-ta
 python-telegram-bot[ext, job-queue]
 scipy
+requests
