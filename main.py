@@ -86,6 +86,38 @@ PRESET_VERY_LAX = {
 }
 PRESETS = {"PRO": PRESET_PRO, "LAX": PRESET_LAX, "STRICT": PRESET_STRICT, "VERY_LAX": PRESET_VERY_LAX}
 
+# --- [EDIT] Expanded Constants for a more comprehensive Interactive Settings menu ---
+EDITABLE_PARAMS = {
+    "إعدادات عامة": [
+        "max_concurrent_trades", "top_n_symbols_by_volume", "concurrent_workers",
+        "min_signal_strength"
+    ],
+    "إعدادات المخاطر": [
+        "virtual_trade_size_percentage", "atr_sl_multiplier", "risk_reward_ratio",
+        "trailing_sl_activate_percent", "trailing_sl_percent"
+    ],
+    "الفلاتر والاتجاه": [
+        "market_regime_filter_enabled", "use_master_trend_filter",
+        "master_adx_filter_level", "master_trend_filter_ma_period", "trailing_sl_enabled"
+    ]
+}
+PARAM_DISPLAY_NAMES = {
+    "virtual_trade_size_percentage": "حجم الصفقة (%)",
+    "max_concurrent_trades": "أقصى عدد للصفقات",
+    "top_n_symbols_by_volume": "عدد العملات للفحص",
+    "concurrent_workers": "عمال الفحص المتزامنين",
+    "min_signal_strength": "أدنى قوة للإشارة",
+    "atr_sl_multiplier": "مضاعف وقف الخسارة (ATR)",
+    "risk_reward_ratio": "نسبة المخاطرة/العائد",
+    "trailing_sl_activate_percent": "تفعيل الوقف المتحرك (%)",
+    "trailing_sl_percent": "مسافة الوقف المتحرك (%)",
+    "market_regime_filter_enabled": "فلتر وضع السوق",
+    "use_master_trend_filter": "فلتر الاتجاه العام",
+    "master_adx_filter_level": "مستوى فلتر ADX",
+    "master_trend_filter_ma_period": "فترة فلتر الاتجاه",
+    "trailing_sl_enabled": "تفعيل الوقف المتحرك"
+}
+
 
 # --- متغيرات الحالة العامة للبوت --- #
 bot_data = {"exchanges": {}, "last_signal_time": {}, "settings": {}, "status_snapshot": {"last_scan_start_time": "N/A", "last_scan_end_time": "N/A", "markets_found": 0, "signals_found": 0, "active_trades_count": 0, "scan_in_progress": False}}
@@ -580,7 +612,7 @@ async def send_telegram_message(bot, signal_data, is_new=False, is_opportunity=F
         icon, title, pnl_label = ("🎯", "هدف محقق!", "الربح") if status_update == 'ناجحة' else ("🛑", "تم تفعيل وقف الخسارة", "الخسارة")
         message = f"{icon} *{title}* {icon}\n\n*العملة:* `{signal_data['symbol']}` | *المنصة:* `{signal_data['exchange']}`\n*{pnl_label}:* `~${abs(signal_data.get('pnl_usdt', 0)):.2f} ({pnl_percent:+.2f}%)`"
     elif update_type == 'tsl_activation':
-        message = f"🔒 *تأمين أرباح* 🔒\n\n*العملة:* `{signal_data['symbol']}`\nتم نقل وقف الخسارة إلى `${format_price(signal_data['stop_loss'])}`."
+        message = f"🔒 *تأمين صفقة* 🔒\n\n*العملة:* `{signal_data['symbol']}`\nتم نقل وقف الخسارة إلى نقطة الدخول: `${format_price(signal_data['new_sl'])}`."
     
     if not message: return
     for attempt in range(3):
@@ -612,7 +644,7 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
             if settings.get('trailing_sl_enabled', False):
                 highest_price = max(trade.get('highest_price', current_price), current_price)
                 if not trade.get('trailing_sl_active') and current_price >= trade['entry_price'] * (1 + settings['trailing_sl_activate_percent'] / 100):
-                    new_sl = trade['entry_price'] * (1 + (settings.get('trailing_sl_activate_percent', 2.0) - settings.get('trailing_sl_percent', 1.5)) / 100)
+                    new_sl = trade['entry_price']
                     if new_sl > trade['stop_loss']: return {'id': trade['id'], 'status': 'update_tsl', 'new_sl': new_sl, 'highest_price': highest_price}
                 elif trade.get('trailing_sl_active'):
                     new_sl = highest_price * (1 - settings['trailing_sl_percent'] / 100)
@@ -655,93 +687,53 @@ async def check_market_regime():
         return df['close'].iloc[-1] > df['sma50'].iloc[-1]
     except Exception: return True
 
-# --- [NEW] دالة إنشاء تقرير أداء الاستراتيجيات --- #
 def generate_performance_report_string():
-    """
-    يقوم بالاتصال بقاعدة البيانات، تحليل الصفقات لآخر 30 يومًا،
-    وإنشاء تقرير أداء لكل استراتيجية كنص.
-    """
     REPORT_DAYS = 30
     if not os.path.exists(DB_FILE):
-        return "❌ خطأ: لم يتم العثور على ملف قاعدة البيانات. تأكد من تشغيل البوت أولاً لإنشائه."
+        return "❌ خطأ: لم يتم العثور على ملف قاعدة البيانات."
 
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=10)
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-
+        conn = sqlite3.connect(DB_FILE, timeout=10); conn.row_factory = sqlite3.Row; cursor = conn.cursor()
         start_date = datetime.now() - timedelta(days=REPORT_DAYS)
         start_date_str = start_date.strftime('%Y-%m-%d %H:%M:%S')
-
-        query = """
-        SELECT reason, status, entry_price, highest_price
-        FROM trades
-        WHERE status IN ('ناجحة', 'فاشلة') AND timestamp >= ?
-        """
-        cursor.execute(query, (start_date_str,))
-        trades = cursor.fetchall()
-        conn.close()
-
+        query = "SELECT reason, status, entry_price, highest_price FROM trades WHERE status IN ('ناجحة', 'فاشلة') AND timestamp >= ?"
+        cursor.execute(query, (start_date_str,)); trades = cursor.fetchall(); conn.close()
     except Exception as e:
         return f"❌ حدث خطأ غير متوقع: {e}"
 
-    if not trades:
-        return f"ℹ️ لا توجد صفقات مغلقة في آخر {REPORT_DAYS} يومًا لإنشاء تقرير."
+    if not trades: return f"ℹ️ لا توجد صفقات مغلقة في آخر {REPORT_DAYS} يومًا."
 
     strategy_stats = {}
     for trade in trades:
         reason = trade['reason']
-        if reason not in strategy_stats:
-            strategy_stats[reason] = {
-                'total': 0,
-                'successful': 0,
-                'max_profits': []
-            }
-
-        stats = strategy_stats[reason]
-        stats['total'] += 1
-        if trade['status'] == 'ناجحة':
-            stats['successful'] += 1
-
+        if reason not in strategy_stats: strategy_stats[reason] = {'total': 0, 'successful': 0, 'max_profits': []}
+        stats = strategy_stats[reason]; stats['total'] += 1
+        if trade['status'] == 'ناجحة': stats['successful'] += 1
         if trade['entry_price'] > 0 and trade['highest_price'] is not None:
             max_profit_percent = ((trade['highest_price'] - trade['entry_price']) / trade['entry_price']) * 100
             stats['max_profits'].append(max_profit_percent)
 
-    report_lines = [
-        f"📊 **تقرير أداء الاستراتيجيات (آخر {REPORT_DAYS} يومًا)** 📊",
-        "="*35
-    ]
+    report_lines = [f"📊 **تقرير أداء الاستراتيجيات (آخر {REPORT_DAYS} يومًا)** 📊", "="*35]
     sorted_strategies = sorted(strategy_stats.items(), key=lambda item: item[1]['total'], reverse=True)
-
     for reason, stats in sorted_strategies:
-        total_trades = stats['total']
+        total_trades = stats['total'];
         if total_trades == 0: continue
         success_rate = (stats['successful'] / total_trades) * 100
         avg_max_profit = sum(stats['max_profits']) / len(stats['max_profits']) if stats['max_profits'] else 0
-        report_lines.append(f"--- **{reason}** ---")
-        report_lines.append(f"- **إجمالي التوصيات:** {total_trades}")
-        report_lines.append(f"- **نسبة النجاح:** {success_rate:.1f}%")
-        report_lines.append(f"- **متوسط أقصى ربح:** {avg_max_profit:.2f}%")
-        report_lines.append("")
-
+        report_lines.extend([f"--- **{reason}** ---", f"- **إجمالي التوصيات:** {total_trades}", f"- **نسبة النجاح:** {success_rate:.1f}%", f"- **متوسط أقصى ربح:** {avg_max_profit:.2f}%", ""])
     return "\n".join(report_lines)
 
 # --- أوامر ولوحات مفاتيح تليجرام --- #
-main_menu_keyboard = [
-    ["📊 الإحصائيات", "📈 الصفقات النشطة"], 
-    ["📜 تقرير الاستراتيجيات", "⚙️ الإعدادات"], 
-    ["👀 ماذا يجري في الخلفية؟", "🔬 فحص يدوي الآن"],
-    ["ℹ️ مساعدة"]
-]
+main_menu_keyboard = [["📊 الإحصائيات", "📈 الصفقات النشطة"], ["📜 تقرير الاستراتيجيات", "⚙️ الإعدادات"], ["👀 ماذا يجري في الخلفية؟", "🔬 فحص يدوي الآن"],["ℹ️ مساعدة"]]
 settings_menu_keyboard = [["🎭 تفعيل/تعطيل الماسحات", "🏁 أنماط جاهزة"], ["🔧 تعديل المعايير", "🔙 القائمة الرئيسية"]]
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("أهلاً بك في محاكي التداول المتقدم! (v24 - Professional Grade)", reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True))
 async def scan_now_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if bot_data['status_snapshot'].get('scan_in_progress', False): await update.message.reply_text("⚠️ فحص آخر قيد التنفيذ حالياً."); return
-    await update.message.reply_text("⏳ جاري بدء الفحص اليدوي...")
-    context.job_queue.run_once(perform_scan, 0, name='manual_scan')
+    if bot_data['status_snapshot'].get('scan_in_progress', False): await update.message.reply_text("⚠️ فحص آخر قيد التنفيذ."); return
+    await update.message.reply_text("⏳ جاري بدء الفحص اليدوي..."); context.job_queue.run_once(perform_scan, 0, name='manual_scan')
+
 async def show_settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target_message = update.message or update.callback_query.message
-    await target_message.reply_text("اختر الإعداد الذي تريد تعديله:", reply_markup=ReplyKeyboardMarkup(settings_menu_keyboard, resize_keyboard=True))
+    await target_message.reply_text("اختر الإعداد:", reply_markup=ReplyKeyboardMarkup(settings_menu_keyboard, resize_keyboard=True))
 
 def get_scanners_keyboard():
     active_scanners = bot_data["settings"].get("active_scanners", [])
@@ -751,23 +743,21 @@ def get_scanners_keyboard():
 
 def get_presets_keyboard():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🚦 احترافية (متوازنة)", callback_data="preset_PRO")],
-        [InlineKeyboardButton("🎯 متشددة", callback_data="preset_STRICT")],
-        [InlineKeyboardButton("🌙 متساهلة", callback_data="preset_LAX")],
-        [InlineKeyboardButton("⚠️ فائق التساهل", callback_data="preset_VERY_LAX")],
+        [InlineKeyboardButton("🚦 احترافية (متوازنة)", callback_data="preset_PRO"), InlineKeyboardButton("🎯 متشددة", callback_data="preset_STRICT")],
+        [InlineKeyboardButton("🌙 متساهلة", callback_data="preset_LAX"), InlineKeyboardButton("⚠️ فائق التساهل", callback_data="preset_VERY_LAX")],
         [InlineKeyboardButton("🔙 العودة للإعدادات", callback_data="back_to_settings")]
     ])
-
+    
 async def show_presets_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target_message = update.message or update.callback_query.message
-    await target_message.reply_text("اختر نمط إعدادات جاهز لتطبيقه على الفلاتر:", reply_markup=get_presets_keyboard())
+    await target_message.reply_text("اختر نمط إعدادات جاهز:", reply_markup=get_presets_keyboard())
 
 async def show_scanners_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target_message = update.message or update.callback_query.message
     await target_message.reply_text("اختر الماسحات لتفعيلها أو تعطيلها:", reply_markup=get_scanners_keyboard())
+
 async def toggle_scanner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    scanner_name = "_".join(query.data.split("_")[1:])
+    query = update.callback_query; scanner_name = "_".join(query.data.split("_")[1:])
     active_scanners = bot_data["settings"].get("active_scanners", []).copy()
     if scanner_name in active_scanners: active_scanners.remove(scanner_name)
     else: active_scanners.append(scanner_name)
@@ -775,16 +765,66 @@ async def toggle_scanner_callback(update: Update, context: ContextTypes.DEFAULT_
     try: await query.edit_message_text(text="اختر الماسحات لتفعيلها أو تعطيلها:", reply_markup=get_scanners_keyboard())
     except BadRequest as e:
         if "Message is not modified" not in str(e): raise
-async def show_set_parameter_instructions(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    params_list = "\n".join([f"`{k}`" for k, v in bot_data["settings"].items() if not isinstance(v, (dict, list))])
-    message = (f"لتعديل معيار، أرسل:\n`اسم_المعيار = قيمة_جديدة`\n\n*المعايير القابلة للتعديل:*\n{params_list}\n\n(لتعديل المعايير المتداخلة مثل `min_rvol`، استخدم قائمة 'أنماط جاهزة').")
-    await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN, reply_markup=ReplyKeyboardMarkup([["🔙 قائمة الإعدادات"]], resize_keyboard=True))
+
+# --- [EDIT] Revamped the interactive settings menu to be more organized and complete ---
+async def show_parameters_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Displays a categorized inline keyboard for modifying parameters."""
+    keyboard = []
+    settings = bot_data["settings"]
+
+    for category, params in EDITABLE_PARAMS.items():
+        # Add a non-clickable category header button
+        keyboard.append([InlineKeyboardButton(f"--- {category} ---", callback_data="ignore")])
+        row = []
+        for param_key in params:
+            display_name = PARAM_DISPLAY_NAMES.get(param_key, param_key)
+            current_value = settings.get(param_key, "N/A")
+            
+            # Special display for boolean values
+            if isinstance(current_value, bool):
+                display_value = "مُفعّل ✅" if current_value else "مُعطّل ❌"
+                text = f"{display_name}: {display_value}"
+            else:
+                text = f"{display_name}: {current_value}"
+
+            row.append(InlineKeyboardButton(text, callback_data=f"param_{param_key}"))
+            if len(row) == 2:
+                keyboard.append(row)
+                row = []
+        if row: # Append any remaining button in the row
+            keyboard.append(row)
+
+    keyboard.append([InlineKeyboardButton("🔙 العودة للإعدادات", callback_data="back_to_settings")])
+    
+    target_message = update.message or update.callback_query.message
+    message_text = "⚙️ *الإعدادات المتقدمة* ⚙️\n\nاختر الإعداد الذي تريد تعديله بالضغط عليه:"
+    
+    # --- [IMPROVEMENT] Store message ID for seamless editing ---
+    # If the message is from a callback, edit it. Otherwise, send a new one.
+    if update.callback_query:
+        try:
+            await update.callback_query.edit_message_text(
+                message_text,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode=ParseMode.MARKDOWN
+            )
+        except BadRequest as e:
+            if "Message is not modified" not in str(e):
+                logging.error(f"Error editing parameters menu: {e}")
+    else:
+        sent_message = await target_message.reply_text(
+            message_text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        context.user_data['settings_menu_id'] = sent_message.message_id
+
+
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("*مساعدة البوت*\n`/start` - بدء\n`/scan` - فحص يدوي\n`/report` - تقرير يومي\n`/strategyreport` - تقرير أداء الاستراتيجيات\n`/check <ID>` - متابعة صفقة\n`/debug` - فحص الحالة", parse_mode=ParseMode.MARKDOWN)
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=10); cursor = conn.cursor()
-        cursor.execute("SELECT status, COUNT(*), SUM(pnl_usdt) FROM trades GROUP BY status")
+        conn = sqlite3.connect(DB_FILE, timeout=10); cursor = conn.cursor(); cursor.execute("SELECT status, COUNT(*), SUM(pnl_usdt) FROM trades GROUP BY status")
         stats_data = cursor.fetchall(); conn.close()
         counts = {s: c for s, c, p in stats_data}; pnl = {s: (p or 0) for s, c, p in stats_data}
         total, active, successful, failed = sum(counts.values()), counts.get('نشطة', 0), counts.get('ناجحة', 0), counts.get('فاشلة', 0)
@@ -801,18 +841,15 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(stats_msg, parse_mode=ParseMode.MARKDOWN)
     except Exception as e: logging.error(f"Error in stats_command: {e}", exc_info=True); await update.message.reply_text("خطأ في جلب الإحصائيات.")
 
-# --- [NEW] أمر إظهار تقرير أداء الاستراتيجيات --- #
 async def strategy_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("⏳ جاري إعداد تقرير أداء الاستراتيجيات...")
-    report_string = generate_performance_report_string()
+    await update.message.reply_text("⏳ جاري إعداد تقرير أداء الاستراتيجيات..."); report_string = generate_performance_report_string()
     await update.message.reply_text(report_string, parse_mode=ParseMode.MARKDOWN)
 
-async def send_daily_report(context: ContextTypes.DEFAULT_TYPE):
+async def send_daily_report(context: ContextTypes.DEFAULT_TYPE) -> bool:
     today_str = datetime.now(EGYPT_TZ).strftime('%Y-%m-%d'); logging.info(f"Generating daily report for {today_str}...")
     try:
         conn = sqlite3.connect(DB_FILE, timeout=10); cursor = conn.cursor()
-        cursor.execute("SELECT status, pnl_usdt FROM trades WHERE DATE(closed_at) = ?", (today_str,))
-        closed_today = cursor.fetchall(); conn.close()
+        cursor.execute("SELECT status, pnl_usdt FROM trades WHERE DATE(closed_at) = ?", (today_str,)); closed_today = cursor.fetchall(); conn.close()
         if not closed_today: report_message = f"🗓️ *التقرير اليومي ليوم {today_str}*\n\nلم يتم إغلاق أي صفقات اليوم."
         else:
             wins, losses, total_pnl = 0, 0, 0.0
@@ -825,10 +862,18 @@ async def send_daily_report(context: ContextTypes.DEFAULT_TYPE):
                               f"▫️ *إجمالي الصفقات المغلقة:* `{total}`\n✅ *الرابحة:* `{wins}` | ❌ *الخاسرة:* `{losses}`\n\n"
                               f"📈 *معدل النجاح:* `{win_rate:.2f}%`\n💰 *الربح/الخسارة:* `${total_pnl:+.2f}`")
         await send_telegram_message(context.bot, {'custom_message': report_message, 'target_chat': TELEGRAM_SIGNAL_CHANNEL_ID}); return True
-    except Exception as e: logging.error(f"Failed to generate daily report: {e}", exc_info=True); return False
+    except Exception as e: 
+        logging.error(f"Failed to generate daily report: {e}", exc_info=True)
+        return False
+        
 async def daily_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ جاري إرسال التقرير اليومي...")
-    if await send_daily_report(context): await update.message.reply_text("✅ تم إرسال التقرير.")
+    # --- [IMPROVEMENT] Add confirmation message on success ---
+    if await send_daily_report(context):
+        await update.message.reply_text("✅ تم إرسال التقرير بنجاح إلى القناة.")
+    else:
+        await update.message.reply_text("❌ فشل إرسال التقرير اليومي.")
+
 async def background_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status = bot_data['status_snapshot']; next_scan_time = "N/A"
     if not status['scan_in_progress'] and context.job_queue:
@@ -838,26 +883,33 @@ async def background_status_command(update: Update, context: ContextTypes.DEFAUL
                f"- *آخر فحص:* `{status['last_scan_end_time']}`\n- *العملات المفحوصة:* `{status['markets_found']}`\n"
                f"- *الإشارات الجديدة:* `{status['signals_found']}`\n- *الصفقات النشطة:* `{status['active_trades_count']}`\n- *الفحص التالي:* `{next_scan_time}`")
     await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
+
 async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    parts = ["*🔍 تقرير التشخيص والحالة*"]
+    await update.message.reply_text("⏳ جاري إعداد تقرير التشخيص الشامل...")
+    settings = bot_data.get("settings", {}); parts = ["🩺 *تقرير التشخيص والحالة* 🩺"]
+    parts.append("\n*--- الإعدادات العامة ---*")
+    active_preset = settings.get("active_preset_name", "N/A"); active_scanners = ", ".join(settings.get("active_scanners", ["None"]))
+    parts.extend([f"- *النمط النشط:* `{active_preset}`", f"- *الماسحات النشطة:* `{active_scanners}`"])
+    parts.append("\n*--- إعدادات المخاطر ---*")
+    balance = settings.get('virtual_portfolio_balance_usdt', 0); trade_size = settings.get('virtual_trade_size_percentage', 0)
+    sl_multiplier = settings.get('atr_sl_multiplier', 0); rr_ratio = settings.get('risk_reward_ratio', 0)
+    parts.extend([f"- *رأس المال الافتراضي:* `${balance:,.2f}`", f"- *حجم الصفقة:* `{trade_size}%` من رأس المال", f"- *مضاعف وقف الخسارة (ATR):* `{sl_multiplier}`", f"- *نسبة المخاطرة/العائد:* `1:{rr_ratio}`"])
+    parts.append("\n*--- حالة المهام المجدولة ---*")
+    if context.job_queue and context.job_queue.jobs():
+        for job in context.job_queue.jobs():
+            if job.next_t: parts.append(f"- *المهمة:* `{job.name}` | *التشغيل التالي:* `{job.next_t.astimezone(ZoneInfo('UTC')).strftime('%H:%M:%S')} (UTC)`")
+            else: parts.append(f"- *المهمة:* `{job.name}` | *الحالة:* `غير مجدولة`")
+    else: parts.append("- `🔴 لا توجد مهام مجدولة!`")
+    parts.append("\n*--- حالة الاتصال بالمنصات ---*")
+    connected_exchanges = bot_data.get('exchanges', {})
+    for ex_id in EXCHANGES_TO_SCAN: parts.append(f"- *{ex_id.capitalize()}:* {'✅ متصل' if ex_id in connected_exchanges else '❌ غير متصل'}")
+    parts.append("\n*--- حالة قاعدة البيانات ---*")
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=10); cursor = conn.cursor(); cursor.execute("SELECT COUNT(*) FROM trades"); count = cursor.fetchone()[0]; conn.close()
-        parts.append(f"✅ *قاعدة البيانات:* متصلة ({count} trades).")
-    except Exception as e: parts.append(f"❌ *قاعدة البيانات:* فشل! ({e})")
-    preset_name = bot_data["settings"].get("active_preset_name", "N/A")
-    parts.append(f"\n*⚙️ النمط النشط:* `{preset_name}`")
-    exchanges_status = [f"  - `{ex_id}`: {'✅' if ex_id in bot_data.get('exchanges', {}) else '❌'}" for ex_id in EXCHANGES_TO_SCAN]
-    parts.append("\n*📡 حالة الاتصال بالمنصات:*"); parts.extend(exchanges_status)
-    parts.append("\n*⚙️ حالة المهام الخلفية:*")
-    if context.job_queue:
-        for name in ['perform_scan', 'track_open_trades', 'daily_report']:
-            job = context.job_queue.get_jobs_by_name(name)
-            if job: parts.append(f"  - `{name}`: ✅ نشطة (التالي: {job[0].next_t.astimezone(EGYPT_TZ).strftime('%H:%M:%S')})")
-            else: parts.append(f"  - `{name}`: ❌ غير نشطة!")
-    else: parts.append("  - ❌ لم يتم العثور على مدير المهام!")
-    parts.append("\n*📊 حالة الماسحات:*"); active = bot_data.get("settings", {}).get("active_scanners", [])
-    parts.extend([f"  - `{s}`: {'✅' if s in active else '❌'}" for s in SCANNERS.keys()])
+        conn = sqlite3.connect(DB_FILE, timeout=5); cursor = conn.cursor(); cursor.execute("SELECT COUNT(*) FROM trades"); total_trades = cursor.fetchone()[0]; conn.close()
+        parts.extend([f"- *الاتصال:* `✅ ناجح`", f"- *إجمالي الصفقات المسجلة:* `{total_trades}`"])
+    except Exception as e: parts.extend([f"- *الاتصال:* `❌ فشل!`", f"- *الخطأ:* `{e}`"])
     await update.message.reply_text("\n".join(parts), parse_mode=ParseMode.MARKDOWN)
+
 async def check_trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE, trade_id_from_callback=None):
     target = update.callback_query.message if trade_id_from_callback else update.message
     def format_price(price): return f"{price:,.8f}" if price < 0.01 else f"{price:,.4f}"
@@ -870,7 +922,7 @@ async def check_trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         if trade['status'] != 'نشطة':
             pnl_percent = (trade['pnl_usdt'] / trade['entry_value_usdt'] * 100) if trade.get('entry_value_usdt', 0) > 0 else 0
             closed_at_dt = datetime.strptime(trade['closed_at'], '%Y-%m-%d %H:%M:%S')
-            message = f"📋 *ملخص الصفقة المغلقة #{trade_id}*\n\n*العملة:* `{trade['symbol']}`\n*الحالة:* `{trade['status']}`\n*تاريخ الإغلاق:* `{closed_at_dt.strftime('%Y-%m-%d %I:%M %p')}`\n*الربح/الخسارة:* `${trade.get('pnl_usdt', 0):+.2f} ({pnl_percent:+.2f}%)`"
+            message = f"📋 *ملخص الصفقة #{trade_id}*\n\n*العملة:* `{trade['symbol']}`\n*الحالة:* `{trade['status']}`\n*تاريخ الإغلاق:* `{closed_at_dt.strftime('%Y-%m-%d %I:%M %p')}`\n*الربح/الخسارة:* `${trade.get('pnl_usdt', 0):+.2f} ({pnl_percent:+.2f}%)`"
         else:
             exchange = bot_data["exchanges"].get(trade['exchange'].lower())
             if not exchange: await target.reply_text("المنصة غير متصلة."); return
@@ -895,72 +947,105 @@ async def show_active_trades_command(update: Update, context: ContextTypes.DEFAU
         keyboard = [[InlineKeyboardButton(f"#{t['id']} | {t['symbol']} | ${t['entry_value_usdt']:.2f} | {t['exchange']}", callback_data=f"check_{t['id']}")] for t in active_trades]
         await update.message.reply_text("اختر صفقة لمتابعتها:", reply_markup=InlineKeyboardMarkup(keyboard))
     except Exception as e: logging.error(f"Error in show_active_trades: {e}"); await update.message.reply_text("خطأ في جلب الصفقات.")
-async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query; await query.answer()
-    data = query.data
 
+async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query; await query.answer(); data = query.data
     if data.startswith("preset_"):
-        preset_name = data.split("_", 1)[1]
-        preset_data = PRESETS.get(preset_name)
+        preset_name = data.split("_", 1)[1]; preset_data = PRESETS.get(preset_name)
         if preset_data:
             for key, value in preset_data.items():
-                if key in bot_data["settings"] and isinstance(bot_data["settings"][key], dict):
-                    bot_data["settings"][key].update(value)
-                else:
-                    bot_data["settings"][key] = value
-            bot_data["settings"]["active_preset_name"] = preset_name
-            save_settings()
-            
-            preset_titles = {"PRO": "احترافي (متوازن)", "STRICT": "متشدد", "LAX": "متساهل", "VERY_LAX": "فائق التساهل"}
-            lf = preset_data['liquidity_filters']
-            vf = preset_data['volatility_filters']
-            
-            confirmation_text = (
-                f"✅ *تم تفعيل النمط: {preset_titles.get(preset_name, preset_name)}*\n\n"
-                f"*أهم القيم المطبقة:*\n"
-                f"`- min_rvol: {lf['min_rvol']}`\n"
-                f"`- max_spread: {lf['max_spread_percent']}%`\n"
-                f"`- min_atr: {vf['min_atr_percent']}%`"
-            )
-            
-            try:
-                await query.edit_message_text(confirmation_text, parse_mode=ParseMode.MARKDOWN, reply_markup=get_presets_keyboard())
+                if key in bot_data["settings"] and isinstance(bot_data["settings"][key], dict): bot_data["settings"][key].update(value)
+                else: bot_data["settings"][key] = value
+            bot_data["settings"]["active_preset_name"] = preset_name; save_settings()
+            preset_titles = {"PRO": "احترافي", "STRICT": "متشدد", "LAX": "متساهل", "VERY_LAX": "فائق التساهل"}
+            lf, vf = preset_data['liquidity_filters'], preset_data['volatility_filters']
+            confirmation_text = f"✅ *تم تفعيل النمط: {preset_titles.get(preset_name, preset_name)}*\n\n*أهم القيم:*\n`- min_rvol: {lf['min_rvol']}`\n`- max_spread: {lf['max_spread_percent']}%`\n`- min_atr: {vf['min_atr_percent']}%`"
+            try: await query.edit_message_text(confirmation_text, parse_mode=ParseMode.MARKDOWN, reply_markup=get_presets_keyboard())
             except BadRequest as e:
                 if "Message is not modified" not in str(e): raise
-        else:
-            await query.message.reply_text("❌ نمط غير معروف.")
+        else: await query.message.reply_text("❌ نمط غير معروف.")
         return
+    elif data.startswith("param_"):
+        param_key = data.split("_", 1)[1]; display_name = PARAM_DISPLAY_NAMES.get(param_key, param_key)
+        current_value = bot_data["settings"].get(param_key, "N/A")
+        context.user_data['awaiting_input_for_param'] = param_key
+        # --- [IMPROVEMENT] Store message ID for seamless editing ---
+        context.user_data['settings_menu_id'] = query.message.message_id
+        
+        # For boolean values, just toggle them directly without asking for input
+        if isinstance(current_value, bool):
+            bot_data["settings"][param_key] = not current_value
+            bot_data["settings"]["active_preset_name"] = "Custom"
+            save_settings()
+            await query.answer(f"✅ تم تبديل '{display_name}'")
+            # Refresh the menu
+            await show_parameters_menu(update, context)
+            return
 
+        await query.edit_message_text(f"📝 *تعديل '{display_name}'*\n\n*القيمة الحالية:* `{current_value}`\n\nالرجاء إرسال القيمة الجديدة.", parse_mode=ParseMode.MARKDOWN)
+        return
+    # --- [NEW] Ignore clicks on category headers ---
+    elif data == "ignore":
+        return
     if data.startswith("toggle_"): await toggle_scanner_callback(update, context)
     elif data == "back_to_settings":
-        await query.message.delete()
+        # Check if the message exists before trying to delete
+        if query.message:
+            await query.message.delete()
         await context.bot.send_message(chat_id=query.message.chat_id, text="اختر الإعداد:", reply_markup=ReplyKeyboardMarkup(settings_menu_keyboard, resize_keyboard=True))
     elif data.startswith("check_"): await check_trade_command(update, context, trade_id_from_callback=int(data.split("_")[1]))
+
 async def main_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # --- [IMPROVEMENT] This block now handles parameter updates with a much cleaner UX ---
+    if 'awaiting_input_for_param' in context.user_data:
+        param = context.user_data.pop('awaiting_input_for_param'); value_str = update.message.text
+        settings_menu_id = context.user_data.pop('settings_menu_id', None)
+        chat_id = update.message.chat_id
+
+        # Clean up the user's input message
+        await context.bot.delete_message(chat_id=chat_id, message_id=update.message.message_id)
+
+        settings = bot_data["settings"]
+        try:
+            current = settings[param]
+            if isinstance(current, bool): new = value_str.lower() in ['true', '1', 'yes', 'on', 'نعم', 'تفعيل']
+            elif isinstance(current, int): new = int(value_str)
+            else: new = float(value_str)
+            settings[param] = new; settings["active_preset_name"] = "Custom"; save_settings()
+            display_name = PARAM_DISPLAY_NAMES.get(param, param)
+            
+            # Use the original menu message ID to show the updated menu
+            if settings_menu_id:
+                context.user_data['settings_menu_id'] = settings_menu_id # Put it back for the menu function
+                await show_parameters_menu(update, context)
+            else: # Fallback if ID was lost
+                await show_parameters_menu(update, context)
+            
+            # Send a temporary confirmation message
+            confirm_msg = await update.message.reply_text(f"✅ تم تحديث **{display_name}** بنجاح إلى `{new}`.", parse_mode=ParseMode.MARKDOWN)
+            # Delete the confirmation message after a few seconds
+            await asyncio.sleep(4)
+            await context.bot.delete_message(chat_id=chat_id, message_id=confirm_msg.message_id)
+
+        except (ValueError, KeyError):
+            context.user_data['awaiting_input_for_param'] = param # Reset state
+            context.user_data['settings_menu_id'] = settings_menu_id
+            if settings_menu_id:
+                await context.bot.edit_message_text(chat_id=chat_id, message_id=settings_menu_id, text="❌ قيمة غير صالحة. الرجاء المحاولة مرة أخرى.")
+                await asyncio.sleep(3)
+                await show_parameters_menu(update, context) # Show the menu again
+        return
+
     handlers = {
         "📊 الإحصائيات": stats_command, "📈 الصفقات النشطة": show_active_trades_command, "ℹ️ مساعدة": help_command,
         "⚙️ الإعدادات": show_settings_menu, "👀 ماذا يجري في الخلفية؟": background_status_command, "🔬 فحص يدوي الآن": scan_now_command,
-        "🔧 تعديل المعايير": show_set_parameter_instructions, "🔙 القائمة الرئيسية": start_command,
+        "🔧 تعديل المعايير": show_parameters_menu, "🔙 القائمة الرئيسية": start_command,
         "🔙 قائمة الإعدادات": show_settings_menu, "🎭 تفعيل/تعطيل الماسحات": show_scanners_menu,
-        "🏁 أنماط جاهزة": show_presets_menu, "📜 تقرير الاستراتيجيات": strategy_report_command, # <-- [NEW] Handler for the new button
+        "🏁 أنماط جاهزة": show_presets_menu, "📜 تقرير الاستراتيجيات": strategy_report_command,
     }
     text = update.message.text
     if text in handlers: await handlers[text](update, context)
-    elif re.match(r"^\s*(\w+)\s*=\s*(.+)\s*$", text):
-        match = re.match(r"^\s*(\w+)\s*=\s*(.+)\s*$", text); param, value_str = match.groups()
-        settings = bot_data["settings"]
-        if param in settings and not isinstance(settings[param], (dict, list)):
-            try:
-                current = settings[param]
-                if isinstance(current, bool): new = value_str.lower() in ['true', '1', 'yes', 'on']
-                elif isinstance(current, int): new = int(value_str)
-                else: new = float(value_str)
-                settings[param] = new
-                settings["active_preset_name"] = "Custom"
-                save_settings()
-                await update.message.reply_text(f"✅ تم تحديث `{param}` إلى `{new}`.\n*تنبيه: تم تغيير النمط إلى 'مخصص'.*")
-            except ValueError: await update.message.reply_text(f"❌ قيمة غير صالحة.")
-        else: await update.message.reply_text(f"❌ خطأ: المعيار `{param}` غير موجود.")
+
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None: logging.error(f"Exception: {context.error}", exc_info=context.error)
 async def post_init(application: Application):
     logging.info("Post-init: Initializing exchanges...")
@@ -973,17 +1058,16 @@ async def post_init(application: Application):
         report_time = dt_time(hour=23, minute=55, tzinfo=EGYPT_TZ)
         application.job_queue.run_daily(send_daily_report, time=report_time, name='daily_report')
         logging.info(f"Daily report scheduled for {report_time.strftime('%H:%M:%S')} {EGYPT_TZ}.")
-    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *محاكي التداول المتقدم (v24 - Professional Grade) جاهز للعمل!*", parse_mode=ParseMode.MARKDOWN)
+    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *محاكي التداول المتقدم جاهز للعمل!*", parse_mode=ParseMode.MARKDOWN)
     logging.info("Post-init finished.")
 async def post_shutdown(application: Application): await asyncio.gather(*[ex.close() for ex in bot_data["exchanges"].values()]); logging.info("Connections closed.")
 def main():
-    print("🚀 Starting Pro Trading Simulator Bot (v24 - Professional Grade)...")
+    print("🚀 Starting Pro Trading Simulator Bot...")
     load_settings(); init_database()
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).post_shutdown(post_shutdown).build()
     application.add_handler(CommandHandler("start", start_command)); application.add_handler(CommandHandler("scan", scan_now_command))
     application.add_handler(CommandHandler("report", daily_report_command)); application.add_handler(CommandHandler("check", check_trade_command))
-    application.add_handler(CommandHandler("debug", debug_command))
-    application.add_handler(CommandHandler("strategyreport", strategy_report_command)) # <-- [NEW] Command handler
+    application.add_handler(CommandHandler("debug", debug_command)); application.add_handler(CommandHandler("strategyreport", strategy_report_command))
     application.add_handler(CallbackQueryHandler(button_callback_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, main_text_handler)); application.add_error_handler(error_handler)
     print("✅ Bot is now running and polling for updates...")
