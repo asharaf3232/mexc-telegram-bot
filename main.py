@@ -13,6 +13,9 @@ import time
 import sqlite3
 from datetime import datetime, time as dt_time, timedelta
 from zoneinfo import ZoneInfo
+
+# [NEW] Add requests for Fear & Greed Index
+import requests
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
@@ -45,18 +48,19 @@ SCAN_INTERVAL_SECONDS = 900
 TRACK_INTERVAL_SECONDS = 120
 
 APP_ROOT = '.'
-DB_FILE = os.path.join(APP_ROOT, 'trading_bot_v24.db')
-SETTINGS_FILE = os.path.join(APP_ROOT, 'settings_v24.json')
+DB_FILE = os.path.join(APP_ROOT, 'trading_bot_v25.db')
+SETTINGS_FILE = os.path.join(APP_ROOT, 'settings_v25.json')
 
 
 EGYPT_TZ = ZoneInfo("Africa/Cairo")
 
 # --- إعداد مسجل الأحداث (Logger) --- #
-LOG_FILE = os.path.join(APP_ROOT, 'bot_v24.log')
+LOG_FILE = os.path.join(APP_ROOT, 'bot_v25.log')
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO, handlers=[logging.FileHandler(LOG_FILE, 'w'), logging.StreamHandler()])
 logging.getLogger('httpx').setLevel(logging.WARNING)
 logging.getLogger('apscheduler').setLevel(logging.WARNING)
 logging.getLogger('telegram').setLevel(logging.WARNING)
+logging.getLogger('requests').setLevel(logging.WARNING) # Mute requests library logs
 
 
 # --- [IMPROVEMENT] Preset Configurations ---
@@ -97,8 +101,8 @@ EDITABLE_PARAMS = {
         "trailing_sl_activate_percent", "trailing_sl_percent"
     ],
     "الفلاتر والاتجاه": [
-        "market_regime_filter_enabled", "use_master_trend_filter",
-        "master_adx_filter_level", "master_trend_filter_ma_period", "trailing_sl_enabled"
+        "market_regime_filter_enabled", "use_master_trend_filter", "fear_and_greed_filter_enabled",
+        "master_adx_filter_level", "master_trend_filter_ma_period", "trailing_sl_enabled", "fear_and_greed_threshold"
     ]
 }
 PARAM_DISPLAY_NAMES = {
@@ -111,11 +115,13 @@ PARAM_DISPLAY_NAMES = {
     "risk_reward_ratio": "نسبة المخاطرة/العائد",
     "trailing_sl_activate_percent": "تفعيل الوقف المتحرك (%)",
     "trailing_sl_percent": "مسافة الوقف المتحرك (%)",
-    "market_regime_filter_enabled": "فلتر وضع السوق",
-    "use_master_trend_filter": "فلتر الاتجاه العام",
+    "market_regime_filter_enabled": "فلتر وضع السوق (متكامل)",
+    "use_master_trend_filter": "فلتر الاتجاه العام (BTC)",
     "master_adx_filter_level": "مستوى فلتر ADX",
     "master_trend_filter_ma_period": "فترة فلتر الاتجاه",
-    "trailing_sl_enabled": "تفعيل الوقف المتحرك"
+    "trailing_sl_enabled": "تفعيل الوقف المتحرك",
+    "fear_and_greed_filter_enabled": "فلتر الخوف والطمع", # New
+    "fear_and_greed_threshold": "حد مؤشر الخوف", # New
 }
 
 
@@ -128,6 +134,7 @@ DEFAULT_SETTINGS = {
     "virtual_portfolio_balance_usdt": 1000.0, "virtual_trade_size_percentage": 5.0, "max_concurrent_trades": 5, "top_n_symbols_by_volume": 250, "concurrent_workers": 10, "market_regime_filter_enabled": True,
     "active_scanners": ["momentum_breakout", "breakout_squeeze_pro", "rsi_divergence", "supertrend_pullback"],
     "use_master_trend_filter": True, "master_trend_filter_ma_period": 50, "master_adx_filter_level": 22,
+    "fear_and_greed_filter_enabled": True, "fear_and_greed_threshold": 30, # New settings
     "use_dynamic_risk_management": True, "atr_period": 14, "atr_sl_multiplier": 2.0, "risk_reward_ratio": 1.5,
     "take_profit_percentage": 4.0, "stop_loss_percentage": 2.0, "trailing_sl_enabled": True, "trailing_sl_activate_percent": 2.0, "trailing_sl_percent": 1.5,
     "momentum_breakout": {"vwap_period": 14, "macd_fast": 12, "macd_slow": 26, "macd_signal": 9, "bbands_period": 20, "bbands_stddev": 2.0, "rsi_period": 14, "rsi_max_level": 68, "volume_spike_multiplier": 1.5},
@@ -156,7 +163,7 @@ def load_settings():
                     for sub_key, sub_value in value.items():
                         if sub_key not in bot_data["settings"].get(key, {}):
                             bot_data["settings"][key][sub_key] = sub_value; updated = True
-            
+
             keys_to_remove = [key for key in bot_data["settings"] if key not in DEFAULT_SETTINGS]
             if keys_to_remove:
                 logging.info(f"Removing obsolete settings keys: {keys_to_remove}")
@@ -219,19 +226,19 @@ def analyze_momentum_breakout(df, params, rvol):
     df.ta.bbands(length=params['bbands_period'], std=params['bbands_stddev'], append=True)
     df.ta.macd(fast=params['macd_fast'], slow=params['macd_slow'], signal=params['macd_signal'], append=True)
     df.ta.rsi(length=params['rsi_period'], append=True)
-    
+
     macd_col = find_col(df.columns, f"MACD_{params['macd_fast']}_{params['macd_slow']}_{params['macd_signal']}")
     macds_col = find_col(df.columns, f"MACDs_{params['macd_fast']}_{params['macd_slow']}_{params['macd_signal']}")
     bbu_col = find_col(df.columns, f"BBU_{params['bbands_period']}_")
     rsi_col = find_col(df.columns, f"RSI_{params['rsi_period']}")
 
     if not all([macd_col, macds_col, bbu_col, rsi_col]): return None
-    
+
     last, prev = df.iloc[-2], df.iloc[-3]
-    
+
     volume_ok = last['volume'] > (df['volume'].rolling(20).mean().iloc[-2] * params['volume_spike_multiplier'])
     rvol_ok = rvol >= bot_data['settings']['liquidity_filters']['min_rvol']
-    
+
     if (prev[macd_col] <= prev[macds_col] and last[macd_col] > last[macds_col] and
         last['close'] > last[bbu_col] and last['close'] > last["VWAP_D"] and
         last[rsi_col] < params['rsi_max_level'] and volume_ok and rvol_ok):
@@ -242,7 +249,7 @@ def analyze_breakout_squeeze_pro(df, params, rvol):
     df.ta.bbands(length=params['bbands_period'], std=params['bbands_stddev'], append=True)
     df.ta.kc(length=params['keltner_period'], scalar=params['keltner_atr_multiplier'], append=True)
     df.ta.obv(append=True)
-    
+
     bbu_col = find_col(df.columns, f"BBU_{params['bbands_period']}_")
     bbl_col = find_col(df.columns, f"BBL_{params['bbands_period']}_")
     kcu_col = find_col(df.columns, f"KCUe_{params['keltner_period']}_")
@@ -252,13 +259,13 @@ def analyze_breakout_squeeze_pro(df, params, rvol):
 
     last, prev = df.iloc[-2], df.iloc[-3]
     is_in_squeeze = prev[bbl_col] > prev[kcl_col] and prev[bbu_col] < prev[kcu_col]
-    
+
     if is_in_squeeze:
         breakout_fired = last['close'] > last[bbu_col]
         volume_ok = not params['volume_confirmation_enabled'] or last['volume'] > df['volume'].rolling(20).mean().iloc[-2] * 1.5
         rvol_ok = rvol >= bot_data['settings']['liquidity_filters']['min_rvol']
         obv_rising = df['OBV'].iloc[-2] > df['OBV'].iloc[-3]
-        
+
         if breakout_fired and volume_ok and rvol_ok and obv_rising:
             return {"reason": "Squeeze Breakout", "type": "long"}
     return None
@@ -272,7 +279,7 @@ def find_divergence_points(series, lookback):
 def analyze_rsi_divergence(df, params):
     if not SCIPY_AVAILABLE: return None
     df.ta.rsi(length=params['rsi_period'], append=True)
-    
+
     rsi_col = find_col(df.columns, f"RSI_{params['rsi_period']}")
     if not rsi_col or df[rsi_col].isnull().all(): return None
 
@@ -283,10 +290,10 @@ def analyze_rsi_divergence(df, params):
     if len(price_troughs_idx) >= 2 and len(rsi_troughs_idx) >= 2:
         p_low1_idx, p_low2_idx = price_troughs_idx[-2], price_troughs_idx[-1]
         r_low1_idx, r_low2_idx = rsi_troughs_idx[-2], rsi_troughs_idx[-1]
-        
+
         is_divergence = (subset.iloc[p_low2_idx]['low'] < subset.iloc[p_low1_idx]['low'] and 
                             subset.iloc[r_low2_idx][rsi_col] > subset.iloc[r_low1_idx][rsi_col])
-        
+
         if is_divergence:
             rsi_exits_oversold = (subset.iloc[r_low1_idx][rsi_col] < 35 and 
                                     subset.iloc[-2][rsi_col] > 40)
@@ -302,7 +309,7 @@ def analyze_supertrend_pullback(df, params, rvol, adx_value):
     st_dir_col = find_col(df.columns, f"SUPERTd_{params['atr_period']}_")
     ema_col = find_col(df.columns, 'EMA_') # Assumes EMA is calculated in worker
     if not st_dir_col or not ema_col: return None
-    
+
     last, prev = df.iloc[-2], df.iloc[-3]
     st_flipped_bullish = prev[st_dir_col] == -1 and last[st_dir_col] == 1
 
@@ -311,11 +318,11 @@ def analyze_supertrend_pullback(df, params, rvol, adx_value):
         ema_ok = last['close'] > last[ema_col]
         adx_ok = adx_value >= settings['master_adx_filter_level']
         rvol_ok = rvol >= settings['liquidity_filters']['min_rvol']
-        
+
         lookback_period = params.get('swing_high_lookback', 10)
         recent_swing_high = df['high'].iloc[-lookback_period:-2].max()
         breakout_ok = last['close'] > recent_swing_high
-        
+
         if ema_ok and adx_ok and rvol_ok and breakout_ok:
             return {"reason": "Supertrend Flip", "type": "long"}
     return None
@@ -347,7 +354,7 @@ async def aggregate_top_movers():
         except Exception: return []
     results = await asyncio.gather(*[fetch(ex_id, ex) for ex_id, ex in bot_data["exchanges"].items()])
     for res in results: all_tickers.extend(res)
-    
+
     settings = bot_data['settings']
     excluded_bases = settings['stablecoin_filter']['exclude_bases']
     min_volume = settings['liquidity_filters']['min_quote_volume_24h_usd']
@@ -360,11 +367,11 @@ async def aggregate_top_movers():
         and t.get('quoteVolume', 0) >= min_volume
         and not any(k in t['symbol'].upper() for k in ['UP','DOWN','3L','3S','BEAR','BULL'])
     ]
-    
+
     sorted_tickers = sorted(usdt_tickers, key=lambda t: t.get('quoteVolume', 0), reverse=True)
     unique_symbols = {t['symbol']: {'exchange': t['exchange'], 'symbol': t['symbol']} for t in sorted_tickers}
     final_list = list(unique_symbols.values())[:settings['top_n_symbols_by_volume']]
-    
+
     logging.info(f"Aggregated markets. Found {len(all_tickers)} tickers -> Post-filter: {len(usdt_tickers)} -> Selected top {len(final_list)} unique pairs.")
     bot_data['status_snapshot']['markets_found'] = len(final_list)
     return final_list
@@ -389,11 +396,11 @@ async def worker(queue, results_list, settings, failure_counter):
         if not exchange or not settings.get('active_scanners'): 
             queue.task_done()
             continue
-        
+
         try:
             await asyncio.sleep(0.2)
             logging.info(f"--- Checking {symbol} on {exchange.id} ---")
-            
+
             liq_filters = settings['liquidity_filters']
             vol_filters = settings['volatility_filters']
             ema_filters = settings['ema_trend_filter']
@@ -419,7 +426,7 @@ async def worker(queue, results_list, settings, failure_counter):
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
             df.set_index('timestamp', inplace=True)
-            
+
             df['volume_sma'] = ta.sma(df['volume'], length=liq_filters['rvol_period'])
             rvol = df['volume'].iloc[-2] / df['volume_sma'].iloc[-2] if df['volume_sma'].iloc[-2] > 0 else 0
             if rvol < liq_filters['min_rvol']:
@@ -441,7 +448,7 @@ async def worker(queue, results_list, settings, failure_counter):
                 if last_close < df[ema_col_name].iloc[-2]:
                     logging.info(f"Reject {symbol}: Below EMA{ema_filters['ema_period']} ({last_close:.4f} < {df[ema_col_name].iloc[-2]:.4f})")
                     continue
-            
+
             if settings.get('use_master_trend_filter'):
                 is_htf_bullish, reason = await get_higher_timeframe_trend(exchange, symbol, settings['master_trend_filter_ma_period'])
                 if is_htf_bullish == False:
@@ -458,7 +465,7 @@ async def worker(queue, results_list, settings, failure_counter):
                     logging.info(f"ADX Filter: FAILED (ADX {reason}) for {symbol}")
                     continue
                 logging.info(f"ADX Filter: PASSED (ADX is {adx_value:.2f}) for {symbol}")
-            
+
             confirmed_reasons = []
             analysis_df = df.copy() 
 
@@ -469,7 +476,7 @@ async def worker(queue, results_list, settings, failure_counter):
                     scanner_args['rvol'] = rvol
                 if scanner_name == "supertrend_pullback":
                     scanner_args['adx_value'] = adx_value
-                
+
                 analysis_result = scanner_func(**scanner_args)
                 if analysis_result and analysis_result.get("type") == "long":
                     confirmed_reasons.append(analysis_result['reason'])
@@ -483,22 +490,22 @@ async def worker(queue, results_list, settings, failure_counter):
                 else:
                     reason_str = ' + '.join(confirmed_reasons)
                     logging.info(f"SIGNAL FOUND for {symbol} with strength {strength} via {reason_str}")
-                    
+
                     entry_price = df.iloc[-2]['close']
                     current_atr_col = find_col(df.columns, f"ATRr_{settings['atr_period']}")
                     if not current_atr_col: df.ta.atr(length=settings['atr_period'], append=True)
                     current_atr = df.iloc[-2].get(find_col(df.columns, f"ATRr_{settings['atr_period']}"), 0)
-                    
+
                     if settings.get("use_dynamic_risk_management", False) and current_atr > 0 and not pd.isna(current_atr):
                         risk_per_unit = current_atr * settings['atr_sl_multiplier']
                         stop_loss, take_profit = entry_price - risk_per_unit, entry_price + (risk_per_unit * settings['risk_reward_ratio'])
                     else:
                         stop_loss, take_profit = entry_price * (1 - settings['stop_loss_percentage'] / 100), entry_price * (1 + settings['take_profit_percentage'] / 100)
-                    
+
                     min_filters = settings['min_tp_sl_filter']
                     tp_percent = ((take_profit - entry_price) / entry_price * 100)
                     sl_percent = ((entry_price - stop_loss) / entry_price * 100)
-                    
+
                     if tp_percent < min_filters['min_tp_percent'] or sl_percent < min_filters['min_sl_percent']:
                         logging.info(f"Reject {symbol} Signal: Small TP/SL (TP: {tp_percent:.2f}%, SL: {sl_percent:.2f}%)")
                     else:
@@ -523,7 +530,7 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
 
         status = bot_data['status_snapshot']
         status.update({"scan_in_progress": True, "last_scan_start_time": datetime.now(EGYPT_TZ).strftime('%Y-%m-%d %H:%M:%S'), "signals_found": 0})
-        
+
         settings = bot_data["settings"]
         try:
             conn = sqlite3.connect(DB_FILE, timeout=10); cursor = conn.cursor()
@@ -531,19 +538,23 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
             active_trades_count = cursor.fetchone()[0]; conn.close()
         except Exception as e:
             logging.error(f"DB Error in perform_scan: {e}"); active_trades_count = settings.get("max_concurrent_trades", 5)
-        
-        if settings.get('market_regime_filter_enabled', True) and not await check_market_regime():
-            logging.info("Skipping scan: Bearish market regime detected."); status['scan_in_progress'] = False; return
-        
+
+        if settings.get('market_regime_filter_enabled', True):
+            is_market_ok, reason = await check_market_regime()
+            if not is_market_ok:
+                logging.info(f"Skipping scan: {reason}")
+                status['scan_in_progress'] = False
+                return
+
         top_markets = await aggregate_top_movers()
         if not top_markets:
             logging.info("Scan complete: No markets to scan."); status['scan_in_progress'] = False; return
-        
+
         queue = asyncio.Queue(); [await queue.put(market) for market in top_markets]
         signals, failure_counter = [], [0]
         worker_tasks = [asyncio.create_task(worker(queue, signals, settings, failure_counter)) for _ in range(settings['concurrent_workers'])]
         await queue.join(); [task.cancel() for task in worker_tasks]
-        
+
         signals.sort(key=lambda s: s.get('strength', 0), reverse=True)
 
         total_signals = len(signals)
@@ -553,10 +564,10 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
             if signal['symbol'] in last_signal_time and (time.time() - last_signal_time.get(signal['symbol'], 0)) <= (SCAN_INTERVAL_SECONDS * 4): 
                 logging.info(f"Signal for {signal['symbol']} skipped due to recent notification cooldown.")
                 continue
-            
+
             trade_amount_usdt = settings["virtual_portfolio_balance_usdt"] * (settings["virtual_trade_size_percentage"] / 100)
             signal.update({'quantity': trade_amount_usdt / signal['entry_price'], 'entry_value_usdt': trade_amount_usdt})
-            
+
             if active_trades_count < settings.get("max_concurrent_trades", 5):
                 trade_id = log_recommendation_to_db(signal)
                 if trade_id:
@@ -571,21 +582,21 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
 
         failures = failure_counter[0]
         logging.info(f"Scan complete. Found: {total_signals}, Entered: {new_trades}, Opportunities: {opportunities}, Failures: {failures}.")
-        
+
         summary_message = (f"🔹 *ملخص الفحص* 🔹\n\n"
                             f"▫️ إجمالي الإشارات: *{total_signals}*\n"
                             f"✅ صفقات جديدة: *{new_trades}*\n"
                             f"💡 فرص إضافية: *{opportunities}*\n"
                             f"⚠️ عملات فشل تحليلها: *{failures}*")
         await send_telegram_message(context.bot, {'custom_message': summary_message, 'target_chat': TELEGRAM_CHAT_ID})
-            
+
         status['signals_found'] = new_trades + opportunities
         status['last_scan_end_time'] = datetime.now(EGYPT_TZ).strftime('%Y-%m-%d %H:%M:%S'); status['scan_in_progress'] = False
 
 async def send_telegram_message(bot, signal_data, is_new=False, is_opportunity=False, status_update=None, update_type=None):
     message, keyboard, target_chat = "", None, TELEGRAM_CHAT_ID
     def format_price(price): return f"{price:,.8f}" if price < 0.01 else f"{price:,.4f}"
-    
+
     if 'custom_message' in signal_data:
         message, target_chat = signal_data['custom_message'], signal_data['target_chat']
     elif is_new or is_opportunity:
@@ -613,7 +624,7 @@ async def send_telegram_message(bot, signal_data, is_new=False, is_opportunity=F
         message = f"{icon} *{title}* {icon}\n\n*العملة:* `{signal_data['symbol']}` | *المنصة:* `{signal_data['exchange']}`\n*{pnl_label}:* `~${abs(signal_data.get('pnl_usdt', 0)):.2f} ({pnl_percent:+.2f}%)`"
     elif update_type == 'tsl_activation':
         message = f"🔒 *تأمين صفقة* 🔒\n\n*العملة:* `{signal_data['symbol']}`\nتم نقل وقف الخسارة إلى نقطة الدخول: `${format_price(signal_data['new_sl'])}`."
-    
+
     if not message: return
     for attempt in range(3):
         try:
@@ -669,7 +680,7 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
             await send_telegram_message(context.bot, {**original_trade, **result}, update_type='tsl_activation')
         elif status == 'update_sl': updates_to_db.append(("UPDATE trades SET stop_loss=?, highest_price=? WHERE id=?", (result['new_sl'], result['highest_price'], result['id'])))
         elif status == 'update_peak': updates_to_db.append(("UPDATE trades SET highest_price=? WHERE id=?", (result['highest_price'], result['id'])))
-    
+
     if updates_to_db:
         try:
             conn = sqlite3.connect(DB_FILE, timeout=10); cursor = conn.cursor()
@@ -677,15 +688,52 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
         except Exception as e: logging.error(f"DB update failed in track_open_trades: {e}")
     if portfolio_pnl != 0.0: bot_data['settings']['virtual_portfolio_balance_usdt'] += portfolio_pnl; save_settings(); logging.info(f"Portfolio balance updated by ${portfolio_pnl:.2f}.")
 
+# [NEW] Enhanced Market Regime Filter with Sentiment Analysis
+def get_fear_and_greed_index():
+    """Fetches the latest Fear and Greed Index data."""
+    try:
+        response = requests.get("https://api.alternative.me/fng/?limit=1", timeout=10)
+        response.raise_for_status()
+        data = response.json().get('data', [])
+        if data:
+            return int(data[0]['value'])
+    except Exception as e:
+        logging.error(f"Could not fetch Fear and Greed Index: {e}")
+    return None
+
 async def check_market_regime():
+    """Checks both technical trend and market sentiment."""
+    settings = bot_data['settings']
+    is_technically_bullish, is_sentiment_bullish = True, True # Default to True (fail-safe)
+
+    # 1. Technical Check (BTC Price vs. SMA)
     try:
         binance = bot_data["exchanges"].get('binance')
-        if not binance: return True
-        ohlcv = await binance.fetch_ohlcv('BTC/USDT', '4h', limit=55)
-        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        df['sma50'] = ta.sma(df['close'], length=50)
-        return df['close'].iloc[-1] > df['sma50'].iloc[-1]
-    except Exception: return True
+        if not binance:
+            logging.warning("Binance exchange not available for market regime check. Skipping technical filter.")
+        else:
+            ohlcv = await binance.fetch_ohlcv('BTC/USDT', '4h', limit=55)
+            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            df['sma50'] = ta.sma(df['close'], length=50)
+            is_technically_bullish = df['close'].iloc[-1] > df['sma50'].iloc[-1]
+    except Exception as e:
+        logging.error(f"Error checking BTC trend: {e}")
+
+    # 2. Sentiment Check (Fear & Greed Index)
+    if settings.get("fear_and_greed_filter_enabled", True):
+        fng_index = get_fear_and_greed_index()
+        if fng_index is not None:
+            is_sentiment_bullish = fng_index >= settings.get("fear_and_greed_threshold", 30)
+        # If fng_index is None, is_sentiment_bullish remains True (fail-safe)
+
+    # 3. Final Decision
+    if not is_technically_bullish:
+        return False, "Bearish market regime detected (BTC below 4h SMA50)."
+    if not is_sentiment_bullish:
+        return False, f"Extreme fear detected (F&G Index: {fng_index} is below threshold {settings.get('fear_and_greed_threshold')})."
+
+    return True, "Market regime is favorable for longs."
+
 
 def generate_performance_report_string():
     REPORT_DAYS = 30
@@ -726,7 +774,7 @@ def generate_performance_report_string():
 # --- أوامر ولوحات مفاتيح تليجرام --- #
 main_menu_keyboard = [["📊 الإحصائيات", "📈 الصفقات النشطة"], ["📜 تقرير الاستراتيجيات", "⚙️ الإعدادات"], ["👀 ماذا يجري في الخلفية؟", "🔬 فحص يدوي الآن"],["ℹ️ مساعدة"]]
 settings_menu_keyboard = [["🎭 تفعيل/تعطيل الماسحات", "🏁 أنماط جاهزة"], ["🔧 تعديل المعايير", "🔙 القائمة الرئيسية"]]
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("أهلاً بك في محاكي التداول المتقدم! (v24 - Professional Grade)", reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True))
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("أهلاً بك في محاكي التداول المتقدم! (v25 - Sentiment-Aware)", reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True))
 async def scan_now_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if bot_data['status_snapshot'].get('scan_in_progress', False): await update.message.reply_text("⚠️ فحص آخر قيد التنفيذ."); return
     await update.message.reply_text("⏳ جاري بدء الفحص اليدوي..."); context.job_queue.run_once(perform_scan, 0, name='manual_scan')
@@ -747,7 +795,7 @@ def get_presets_keyboard():
         [InlineKeyboardButton("🌙 متساهلة", callback_data="preset_LAX"), InlineKeyboardButton("⚠️ فائق التساهل", callback_data="preset_VERY_LAX")],
         [InlineKeyboardButton("🔙 العودة للإعدادات", callback_data="back_to_settings")]
     ])
-    
+
 async def show_presets_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target_message = update.message or update.callback_query.message
     await target_message.reply_text("اختر نمط إعدادات جاهز:", reply_markup=get_presets_keyboard())
@@ -779,7 +827,7 @@ async def show_parameters_menu(update: Update, context: ContextTypes.DEFAULT_TYP
         for param_key in params:
             display_name = PARAM_DISPLAY_NAMES.get(param_key, param_key)
             current_value = settings.get(param_key, "N/A")
-            
+
             # Special display for boolean values
             if isinstance(current_value, bool):
                 display_value = "مُفعّل ✅" if current_value else "مُعطّل ❌"
@@ -795,10 +843,10 @@ async def show_parameters_menu(update: Update, context: ContextTypes.DEFAULT_TYP
             keyboard.append(row)
 
     keyboard.append([InlineKeyboardButton("🔙 العودة للإعدادات", callback_data="back_to_settings")])
-    
+
     target_message = update.message or update.callback_query.message
     message_text = "⚙️ *الإعدادات المتقدمة* ⚙️\n\nاختر الإعداد الذي تريد تعديله بالضغط عليه:"
-    
+
     # --- [IMPROVEMENT] Store message ID for seamless editing ---
     # If the message is from a callback, edit it. Otherwise, send a new one.
     if update.callback_query:
@@ -865,7 +913,7 @@ async def send_daily_report(context: ContextTypes.DEFAULT_TYPE) -> bool:
     except Exception as e: 
         logging.error(f"Failed to generate daily report: {e}", exc_info=True)
         return False
-        
+
 async def daily_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ جاري إرسال التقرير اليومي...")
     # --- [IMPROVEMENT] Add confirmation message on success ---
@@ -971,7 +1019,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         context.user_data['awaiting_input_for_param'] = param_key
         # --- [IMPROVEMENT] Store message ID for seamless editing ---
         context.user_data['settings_menu_id'] = query.message.message_id
-        
+
         # For boolean values, just toggle them directly without asking for input
         if isinstance(current_value, bool):
             bot_data["settings"][param_key] = not current_value
@@ -1013,14 +1061,14 @@ async def main_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else: new = float(value_str)
             settings[param] = new; settings["active_preset_name"] = "Custom"; save_settings()
             display_name = PARAM_DISPLAY_NAMES.get(param, param)
-            
+
             # Use the original menu message ID to show the updated menu
             if settings_menu_id:
                 context.user_data['settings_menu_id'] = settings_menu_id # Put it back for the menu function
                 await show_parameters_menu(update, context)
             else: # Fallback if ID was lost
                 await show_parameters_menu(update, context)
-            
+
             # Send a temporary confirmation message
             confirm_msg = await update.message.reply_text(f"✅ تم تحديث **{display_name}** بنجاح إلى `{new}`.", parse_mode=ParseMode.MARKDOWN)
             # Delete the confirmation message after a few seconds
