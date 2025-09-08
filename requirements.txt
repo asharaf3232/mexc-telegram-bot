@@ -1,9 +1,6 @@
-​ccxt
+ccxt
 pandas
 pandas-ta
-requests
+python-telegram-bot[ext, job-queue]
 scipy
-python-telegram-bot[ext,job-queue]
-investpy
-feedparser
-nltk
+requests
