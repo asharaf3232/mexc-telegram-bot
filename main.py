@@ -11,7 +11,7 @@ import json
 import re
 import time
 import sqlite3
-from datetime import datetime, time as dt_time
+from datetime import datetime, time as dt_time, timedelta
 from zoneinfo import ZoneInfo
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
@@ -108,7 +108,6 @@ DEFAULT_SETTINGS = {
     "ema_trend_filter": {"enabled": True, "ema_period": 200},
     "min_tp_sl_filter": {"min_tp_percent": 1.0, "min_sl_percent": 0.5},
     "min_signal_strength": 1,
-    # [IMPROVEMENT] Track the active preset
     "active_preset_name": "Default"
 }
 
@@ -656,9 +655,84 @@ async def check_market_regime():
         return df['close'].iloc[-1] > df['sma50'].iloc[-1]
     except Exception: return True
 
+# --- [NEW] دالة إنشاء تقرير أداء الاستراتيجيات --- #
+def generate_performance_report_string():
+    """
+    يقوم بالاتصال بقاعدة البيانات، تحليل الصفقات لآخر 30 يومًا،
+    وإنشاء تقرير أداء لكل استراتيجية كنص.
+    """
+    REPORT_DAYS = 30
+    if not os.path.exists(DB_FILE):
+        return "❌ خطأ: لم يتم العثور على ملف قاعدة البيانات. تأكد من تشغيل البوت أولاً لإنشائه."
+
+    try:
+        conn = sqlite3.connect(DB_FILE, timeout=10)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        start_date = datetime.now() - timedelta(days=REPORT_DAYS)
+        start_date_str = start_date.strftime('%Y-%m-%d %H:%M:%S')
+
+        query = """
+        SELECT reason, status, entry_price, highest_price
+        FROM trades
+        WHERE status IN ('ناجحة', 'فاشلة') AND timestamp >= ?
+        """
+        cursor.execute(query, (start_date_str,))
+        trades = cursor.fetchall()
+        conn.close()
+
+    except Exception as e:
+        return f"❌ حدث خطأ غير متوقع: {e}"
+
+    if not trades:
+        return f"ℹ️ لا توجد صفقات مغلقة في آخر {REPORT_DAYS} يومًا لإنشاء تقرير."
+
+    strategy_stats = {}
+    for trade in trades:
+        reason = trade['reason']
+        if reason not in strategy_stats:
+            strategy_stats[reason] = {
+                'total': 0,
+                'successful': 0,
+                'max_profits': []
+            }
+
+        stats = strategy_stats[reason]
+        stats['total'] += 1
+        if trade['status'] == 'ناجحة':
+            stats['successful'] += 1
+
+        if trade['entry_price'] > 0 and trade['highest_price'] is not None:
+            max_profit_percent = ((trade['highest_price'] - trade['entry_price']) / trade['entry_price']) * 100
+            stats['max_profits'].append(max_profit_percent)
+
+    report_lines = [
+        f"📊 **تقرير أداء الاستراتيجيات (آخر {REPORT_DAYS} يومًا)** 📊",
+        "="*35
+    ]
+    sorted_strategies = sorted(strategy_stats.items(), key=lambda item: item[1]['total'], reverse=True)
+
+    for reason, stats in sorted_strategies:
+        total_trades = stats['total']
+        if total_trades == 0: continue
+        success_rate = (stats['successful'] / total_trades) * 100
+        avg_max_profit = sum(stats['max_profits']) / len(stats['max_profits']) if stats['max_profits'] else 0
+        report_lines.append(f"--- **{reason}** ---")
+        report_lines.append(f"- **إجمالي التوصيات:** {total_trades}")
+        report_lines.append(f"- **نسبة النجاح:** {success_rate:.1f}%")
+        report_lines.append(f"- **متوسط أقصى ربح:** {avg_max_profit:.2f}%")
+        report_lines.append("")
+
+    return "\n".join(report_lines)
 
 # --- أوامر ولوحات مفاتيح تليجرام --- #
-main_menu_keyboard = [["📊 الإحصائيات", "📈 الصفقات النشطة"], ["⚙️ الإعدادات", "👀 ماذا يجري في الخلفية؟"], ["ℹ️ مساعدة", "🔬 فحص يدوي الآن"]]
+main_menu_keyboard = [
+    ["📊 الإحصائيات", "📈 الصفقات النشطة"], 
+    ["📜 تقرير الاستراتيجيات", "⚙️ الإعدادات"], 
+    ["👀 ماذا يجري في الخلفية؟", "🔬 فحص يدوي الآن"],
+    ["ℹ️ مساعدة"]
+]
 settings_menu_keyboard = [["🎭 تفعيل/تعطيل الماسحات", "🏁 أنماط جاهزة"], ["🔧 تعديل المعايير", "🔙 القائمة الرئيسية"]]
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("أهلاً بك في محاكي التداول المتقدم! (v24 - Professional Grade)", reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True))
 async def scan_now_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -706,7 +780,7 @@ async def show_set_parameter_instructions(update: Update, context: ContextTypes.
     message = (f"لتعديل معيار، أرسل:\n`اسم_المعيار = قيمة_جديدة`\n\n*المعايير القابلة للتعديل:*\n{params_list}\n\n(لتعديل المعايير المتداخلة مثل `min_rvol`، استخدم قائمة 'أنماط جاهزة').")
     await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN, reply_markup=ReplyKeyboardMarkup([["🔙 قائمة الإعدادات"]], resize_keyboard=True))
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("*مساعدة البوت*\n`/start` - بدء\n`/scan` - فحص يدوي\n`/report` - تقرير يومي\n`/check <ID>` - متابعة صفقة\n`/debug` - فحص الحالة", parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text("*مساعدة البوت*\n`/start` - بدء\n`/scan` - فحص يدوي\n`/report` - تقرير يومي\n`/strategyreport` - تقرير أداء الاستراتيجيات\n`/check <ID>` - متابعة صفقة\n`/debug` - فحص الحالة", parse_mode=ParseMode.MARKDOWN)
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         conn = sqlite3.connect(DB_FILE, timeout=10); cursor = conn.cursor()
@@ -726,6 +800,13 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                        f"- *معدل النجاح:* `{win_rate:.2f}%`")
         await update.message.reply_text(stats_msg, parse_mode=ParseMode.MARKDOWN)
     except Exception as e: logging.error(f"Error in stats_command: {e}", exc_info=True); await update.message.reply_text("خطأ في جلب الإحصائيات.")
+
+# --- [NEW] أمر إظهار تقرير أداء الاستراتيجيات --- #
+async def strategy_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("⏳ جاري إعداد تقرير أداء الاستراتيجيات...")
+    report_string = generate_performance_report_string()
+    await update.message.reply_text(report_string, parse_mode=ParseMode.MARKDOWN)
+
 async def send_daily_report(context: ContextTypes.DEFAULT_TYPE):
     today_str = datetime.now(EGYPT_TZ).strftime('%Y-%m-%d'); logging.info(f"Generating daily report for {today_str}...")
     try:
@@ -830,7 +911,6 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             bot_data["settings"]["active_preset_name"] = preset_name
             save_settings()
             
-            # [IMPROVEMENT] Create a detailed confirmation message
             preset_titles = {"PRO": "احترافي (متوازن)", "STRICT": "متشدد", "LAX": "متساهل", "VERY_LAX": "فائق التساهل"}
             lf = preset_data['liquidity_filters']
             vf = preset_data['volatility_filters']
@@ -862,7 +942,7 @@ async def main_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "⚙️ الإعدادات": show_settings_menu, "👀 ماذا يجري في الخلفية؟": background_status_command, "🔬 فحص يدوي الآن": scan_now_command,
         "🔧 تعديل المعايير": show_set_parameter_instructions, "🔙 القائمة الرئيسية": start_command,
         "🔙 قائمة الإعدادات": show_settings_menu, "🎭 تفعيل/تعطيل الماسحات": show_scanners_menu,
-        "🏁 أنماط جاهزة": show_presets_menu,
+        "🏁 أنماط جاهزة": show_presets_menu, "📜 تقرير الاستراتيجيات": strategy_report_command, # <-- [NEW] Handler for the new button
     }
     text = update.message.text
     if text in handlers: await handlers[text](update, context)
@@ -876,7 +956,6 @@ async def main_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 elif isinstance(current, int): new = int(value_str)
                 else: new = float(value_str)
                 settings[param] = new
-                # [IMPROVEMENT] Mark preset as custom if a parameter is changed manually
                 settings["active_preset_name"] = "Custom"
                 save_settings()
                 await update.message.reply_text(f"✅ تم تحديث `{param}` إلى `{new}`.\n*تنبيه: تم تغيير النمط إلى 'مخصص'.*")
@@ -903,12 +982,13 @@ def main():
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).post_shutdown(post_shutdown).build()
     application.add_handler(CommandHandler("start", start_command)); application.add_handler(CommandHandler("scan", scan_now_command))
     application.add_handler(CommandHandler("report", daily_report_command)); application.add_handler(CommandHandler("check", check_trade_command))
-    application.add_handler(CommandHandler("debug", debug_command)); application.add_handler(CallbackQueryHandler(button_callback_handler))
+    application.add_handler(CommandHandler("debug", debug_command))
+    application.add_handler(CommandHandler("strategyreport", strategy_report_command)) # <-- [NEW] Command handler
+    application.add_handler(CallbackQueryHandler(button_callback_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, main_text_handler)); application.add_error_handler(error_handler)
     print("✅ Bot is now running and polling for updates...")
     application.run_polling()
 if __name__ == '__main__':
     try: main()
     except Exception as e: logging.critical(f"Bot stopped due to a critical error: {e}", exc_info=True)
-
 
