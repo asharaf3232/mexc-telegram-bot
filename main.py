@@ -30,7 +30,7 @@ from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
 from telegram.error import BadRequest, RetryAfter, TimedOut
 
-4try:
+try:
     from scipy.signal import find_peaks
     SCIPY_AVAILABLE = True
 except ImportError:
