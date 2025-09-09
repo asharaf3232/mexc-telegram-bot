@@ -61,14 +61,14 @@ SCAN_INTERVAL_SECONDS = 900
 TRACK_INTERVAL_SECONDS = 120
 
 APP_ROOT = '.'
-DB_FILE = os.path.join(APP_ROOT, 'trading_bot_v28.db')
-SETTINGS_FILE = os.path.join(APP_ROOT, 'settings_v28.json')
+DB_FILE = os.path.join(APP_ROOT, 'trading_bot_v29.db')
+SETTINGS_FILE = os.path.join(APP_ROOT, 'settings_v29.json')
 
 
 EGYPT_TZ = ZoneInfo("Africa/Cairo")
 
 # --- إعداد مسجل الأحداث (Logger) --- #
-LOG_FILE = os.path.join(APP_ROOT, 'bot_v28.log')
+LOG_FILE = os.path.join(APP_ROOT, 'bot_v29.log')
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO, handlers=[logging.FileHandler(LOG_FILE, 'w'), logging.StreamHandler()])
 logging.getLogger('httpx').setLevel(logging.WARNING)
 logging.getLogger('apscheduler').setLevel(logging.WARNING)
@@ -461,56 +461,58 @@ async def get_higher_timeframe_trend(exchange, symbol, ma_period):
     except Exception as e:
         return None, f"Error: {e}"
 
+# [FINAL FIX] Corrected the task_done() logic to prevent crashes
 async def worker(queue, results_list, settings, failure_counter):
     while not queue.empty():
         market_info = await queue.get()
         symbol = market_info.get('symbol', 'N/A')
         exchange = bot_data["exchanges"].get(market_info['exchange'])
         if not exchange or not settings.get('active_scanners'):
-            queue.task_done(); continue
+            queue.task_done() 
+            continue
         try:
             liq_filters, vol_filters, ema_filters = settings['liquidity_filters'], settings['volatility_filters'], settings['ema_trend_filter']
             orderbook = await exchange.fetch_order_book(symbol, limit=20)
             if not orderbook or not orderbook['bids'] or not orderbook['asks']:
-                logging.info(f"Reject {symbol}: Could not fetch order book."); queue.task_done(); continue
+                logging.info(f"Reject {symbol}: Could not fetch order book."); continue
             best_bid, best_ask = orderbook['bids'][0][0], orderbook['asks'][0][0]
             if best_bid <= 0:
-                logging.info(f"Reject {symbol}: Invalid bid price."); queue.task_done(); continue
+                logging.info(f"Reject {symbol}: Invalid bid price."); continue
             spread_percent = ((best_ask - best_bid) / best_bid) * 100
             if spread_percent > liq_filters['max_spread_percent']:
-                logging.info(f"Reject {symbol}: High Spread ({spread_percent:.2f}% > {liq_filters['max_spread_percent']}%)"); queue.task_done(); continue
+                logging.info(f"Reject {symbol}: High Spread ({spread_percent:.2f}% > {liq_filters['max_spread_percent']}%)"); continue
             ohlcv = await exchange.fetch_ohlcv(symbol, TIMEFRAME, limit=200)
             if len(ohlcv) < 100:
-                logging.info(f"Skipping {symbol}: Not enough data ({len(ohlcv)} candles)."); queue.task_done(); continue
+                logging.info(f"Skipping {symbol}: Not enough data ({len(ohlcv)} candles)."); continue
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']); df.set_index(pd.to_datetime(df['timestamp'], unit='ms'), inplace=True)
+            if df['volume'].iloc[-2] == 0 or df['volume_sma'].iloc[-2] <= 0:
+                logging.info(f"Skipping {symbol}: Invalid volume data."); continue
             df['volume_sma'] = ta.sma(df['volume'], length=liq_filters['rvol_period'])
-            if df['volume_sma'].iloc[-2] <= 0:
-                logging.info(f"Skipping {symbol}: Invalid SMA volume."); queue.task_done(); continue
             rvol = df['volume'].iloc[-2] / df['volume_sma'].iloc[-2]
             if rvol < liq_filters['min_rvol']:
-                logging.info(f"Reject {symbol}: Low RVOL ({rvol:.2f} < {liq_filters['min_rvol']})"); queue.task_done(); continue
+                logging.info(f"Reject {symbol}: Low RVOL ({rvol:.2f} < {liq_filters['min_rvol']})"); continue
             atr_col_name = f"ATRr_{vol_filters['atr_period_for_filter']}"
             df.ta.atr(length=vol_filters['atr_period_for_filter'], append=True)
             last_close = df['close'].iloc[-2]
             if last_close <= 0:
-                logging.info(f"Skipping {symbol}: Invalid close price."); queue.task_done(); continue
+                logging.info(f"Skipping {symbol}: Invalid close price."); continue
             atr_percent = (df[atr_col_name].iloc[-2] / last_close) * 100
             if atr_percent < vol_filters['min_atr_percent']:
-                logging.info(f"Reject {symbol}: Low ATR% ({atr_percent:.2f}% < {vol_filters['min_atr_percent']}%)"); queue.task_done(); continue
+                logging.info(f"Reject {symbol}: Low ATR% ({atr_percent:.2f}% < {vol_filters['min_atr_percent']}%)"); continue
             if ema_filters['enabled']:
                 ema_col_name = f"EMA_{ema_filters['ema_period']}"
                 df.ta.ema(length=ema_filters['ema_period'], append=True)
                 if last_close < df[ema_col_name].iloc[-2]:
-                    logging.info(f"Reject {symbol}: Below EMA{ema_filters['ema_period']}"); queue.task_done(); continue
+                    logging.info(f"Reject {symbol}: Below EMA{ema_filters['ema_period']}"); continue
             if settings.get('use_master_trend_filter'):
                 is_htf_bullish, reason = await get_higher_timeframe_trend(exchange, symbol, settings['master_trend_filter_ma_period'])
                 if not is_htf_bullish:
-                    logging.info(f"HTF Trend Filter FAILED for {symbol}: {reason}"); queue.task_done(); continue
+                    logging.info(f"HTF Trend Filter FAILED for {symbol}: {reason}"); continue
             df.ta.adx(append=True)
             adx_col = find_col(df.columns, 'ADX_')
             adx_value = df[adx_col].iloc[-2] if adx_col and pd.notna(df[adx_col].iloc[-2]) else 0
             if settings.get('use_master_trend_filter') and adx_value < settings['master_adx_filter_level']:
-                logging.info(f"ADX Filter FAILED for {symbol}: {adx_value:.2f} < {settings['master_adx_filter_level']}"); queue.task_done(); continue
+                logging.info(f"ADX Filter FAILED for {symbol}: {adx_value:.2f} < {settings['master_adx_filter_level']}"); continue
             
             confirmed_reasons = [result['reason'] for scanner_name in settings['active_scanners'] if (result := SCANNERS[scanner_name](df.copy(), settings.get(scanner_name, {}), rvol, adx_value)) and result.get("type") == "long"]
             
@@ -993,7 +995,7 @@ async def post_init(application: Application):
     job_queue.run_repeating(track_open_trades, interval=TRACK_INTERVAL_SECONDS, first=20, name='track_open_trades')
     job_queue.run_daily(send_daily_report, time=dt_time(hour=23, minute=55, tzinfo=EGYPT_TZ), name='daily_report')
     logging.info(f"Jobs scheduled. Daily report at 23:55 {EGYPT_TZ}.")
-    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *المحلل الآلي جاهز للعمل! (v28)*", parse_mode=ParseMode.MARKDOWN)
+    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *المحلل الآلي جاهز للعمل! (v29)*", parse_mode=ParseMode.MARKDOWN)
     logging.info("Post-init finished.")
 async def post_shutdown(application: Application): await asyncio.gather(*[ex.close() for ex in bot_data["exchanges"].values()]); logging.info("All exchange connections closed.")
 
