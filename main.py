@@ -61,14 +61,14 @@ SCAN_INTERVAL_SECONDS = 900
 TRACK_INTERVAL_SECONDS = 120
 
 APP_ROOT = '.'
-DB_FILE = os.path.join(APP_ROOT, 'trading_bot_v31.db')
-SETTINGS_FILE = os.path.join(APP_ROOT, 'settings_v31.json')
+DB_FILE = os.path.join(APP_ROOT, 'trading_bot_v32.db')
+SETTINGS_FILE = os.path.join(APP_ROOT, 'settings_v32.json')
 
 
 EGYPT_TZ = ZoneInfo("Africa/Cairo")
 
 # --- إعداد مسجل الأحداث (Logger) --- #
-LOG_FILE = os.path.join(APP_ROOT, 'bot_v31.log')
+LOG_FILE = os.path.join(APP_ROOT, 'bot_v32.log')
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO, handlers=[logging.FileHandler(LOG_FILE, 'w'), logging.StreamHandler()])
 logging.getLogger('httpx').setLevel(logging.WARNING)
 logging.getLogger('apscheduler').setLevel(logging.WARNING)
@@ -461,7 +461,6 @@ async def get_higher_timeframe_trend(exchange, symbol, ma_period):
     except Exception as e:
         return None, f"Error: {e}"
 
-# [FINAL FIX] Corrected the task_done() and volume_sma logic
 async def worker(queue, results_list, settings, failure_counter):
     while not queue.empty():
         market_info = await queue.get()
@@ -510,10 +509,11 @@ async def worker(queue, results_list, settings, failure_counter):
             if atr_percent < vol_filters['min_atr_percent']:
                 logging.info(f"Reject {symbol}: Low ATR% ({atr_percent:.2f}% < {vol_filters['min_atr_percent']}%)"); continue
             
+            # [LOGIC FIX] Always calculate EMA, but only filter if enabled
+            ema_col_name = f"EMA_{ema_filters['ema_period']}"
+            df.ta.ema(length=ema_filters['ema_period'], append=True)
             if ema_filters['enabled']:
-                ema_col_name = f"EMA_{ema_filters['ema_period']}"
-                df.ta.ema(length=ema_filters['ema_period'], append=True)
-                if last_close < df[ema_col_name].iloc[-2]:
+                if pd.isna(df[ema_col_name].iloc[-2]) or last_close < df[ema_col_name].iloc[-2]:
                     logging.info(f"Reject {symbol}: Below EMA{ema_filters['ema_period']}"); continue
             
             if settings.get('use_master_trend_filter'):
@@ -755,7 +755,7 @@ def generate_performance_report_string():
 main_menu_keyboard = [["📊 الإحصائيات", "📈 الصفقات النشطة"], ["📜 تقرير الاستراتيجيات", "⚙️ الإعدادات"], ["👀 ماذا يجري في الخلفية؟", "🔬 فحص يدوي الآن"],["ℹ️ مساعدة"]]
 settings_menu_keyboard = [["🎭 تفعيل/تعطيل الماسحات", "🏁 أنماط جاهزة"], ["🔧 تعديل المعايير", "🔙 القائمة الرئيسية"]]
 
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("أهلاً بك في بوت المحلل الآلي! (v30 - Final Fix)", reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True))
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("أهلاً بك في بوت المحلل الآلي! (v31 - Final Logic Fix)", reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True))
 async def scan_now_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if bot_data['status_snapshot'].get('scan_in_progress', False): await update.message.reply_text("⚠️ فحص آخر قيد التنفيذ."); return
     await update.message.reply_text("⏳ جاري بدء الفحص اليدوي..."); context.job_queue.run_once(perform_scan, 0, name='manual_scan')
@@ -1008,7 +1008,7 @@ async def post_init(application: Application):
     job_queue.run_repeating(track_open_trades, interval=TRACK_INTERVAL_SECONDS, first=20, name='track_open_trades')
     job_queue.run_daily(send_daily_report, time=dt_time(hour=23, minute=55, tzinfo=EGYPT_TZ), name='daily_report')
     logging.info(f"Jobs scheduled. Daily report at 23:55 {EGYPT_TZ}.")
-    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *المحلل الآلي جاهز للعمل! (v30)*", parse_mode=ParseMode.MARKDOWN)
+    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *المحلل الآلي جاهز للعمل! (v31)*", parse_mode=ParseMode.MARKDOWN)
     logging.info("Post-init finished.")
 async def post_shutdown(application: Application): await asyncio.gather(*[ex.close() for ex in bot_data["exchanges"].values()]); logging.info("All exchange connections closed.")
 
