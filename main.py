@@ -61,14 +61,15 @@ SCAN_INTERVAL_SECONDS = 900
 TRACK_INTERVAL_SECONDS = 120
 
 APP_ROOT = '.'
-DB_FILE = os.path.join(APP_ROOT, 'trading_bot_v32.db')
-SETTINGS_FILE = os.path.join(APP_ROOT, 'settings_v32.json')
+# --- MERGE: Updated version number ---
+DB_FILE = os.path.join(APP_ROOT, 'trading_bot_v33.db')
+SETTINGS_FILE = os.path.join(APP_ROOT, 'settings_v33.json')
 
 
 EGYPT_TZ = ZoneInfo("Africa/Cairo")
 
 # --- إعداد مسجل الأحداث (Logger) --- #
-LOG_FILE = os.path.join(APP_ROOT, 'bot_v32.log')
+LOG_FILE = os.path.join(APP_ROOT, 'bot_v33.log')
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO, handlers=[logging.FileHandler(LOG_FILE, 'w'), logging.StreamHandler()])
 logging.getLogger('httpx').setLevel(logging.WARNING)
 logging.getLogger('apscheduler').setLevel(logging.WARNING)
@@ -235,7 +236,7 @@ def get_alpha_vantage_economic_events():
     if ALPHA_VANTAGE_API_KEY == 'YOUR_AV_KEY_HERE':
         logging.warning("Alpha Vantage API key is not set. Skipping economic calendar check.")
         return []
-    
+
     today_str = datetime.now(timezone.utc).strftime('%Y-%m-%d')
     params = {
         'function': 'ECONOMIC_CALENDAR',
@@ -255,12 +256,12 @@ def get_alpha_vantage_economic_events():
             return []
 
         header = [h.strip() for h in lines[0].split(',')]
-        
+
         high_impact_events = []
         for line in lines[1:]:
             values = [v.strip() for v in line.split(',')]
             event = dict(zip(header, values))
-            
+
             event_date = event.get('releaseDate', '')
             impact = event.get('impact', '').lower()
             country = event.get('country', '')
@@ -335,7 +336,9 @@ def find_col(df_columns, prefix):
         return None
 
 def analyze_momentum_breakout(df, params, rvol, adx_value):
+    # [تعديل بناءً على الباكتست] تم تخفيف شرط حجم التداول الصارم الذي كان يمنع ظهور الإشارات
     df.ta.vwap(append=True)
+    # [تصحيح] التأكد من استخدام المفتاح الصحيح من قاموس الإعدادات (bbands_stddev)
     df.ta.bbands(length=params['bbands_period'], std=params['bbands_stddev'], append=True)
     df.ta.macd(fast=params['macd_fast'], slow=params['macd_slow'], signal=params['macd_signal'], append=True)
     df.ta.rsi(length=params['rsi_period'], append=True)
@@ -347,15 +350,18 @@ def analyze_momentum_breakout(df, params, rvol, adx_value):
     )
     if not all([macd_col, macds_col, bbu_col, rsi_col]): return None
     last, prev = df.iloc[-2], df.iloc[-3]
-    volume_ok = last['volume'] > (df['volume'].rolling(20).mean().iloc[-2] * params['volume_spike_multiplier'])
+    # تم إزالة شرط volume_ok من التحقق النهائي لجعله أقل صرامة
+    # volume_ok = last['volume'] > (df['volume'].rolling(20).mean().iloc[-2] * params['volume_spike_multiplier'])
     rvol_ok = rvol >= bot_data['settings']['liquidity_filters']['min_rvol']
     if (prev[macd_col] <= prev[macds_col] and last[macd_col] > last[macds_col] and
         last['close'] > last[bbu_col] and last['close'] > last["VWAP_D"] and
-        last[rsi_col] < params['rsi_max_level'] and volume_ok and rvol_ok):
+        last[rsi_col] < params['rsi_max_level'] and rvol_ok): # لم نعد نطلب volume_ok هنا
         return {"reason": "Momentum Breakout", "type": "long"}
     return None
 
 def analyze_breakout_squeeze_pro(df, params, rvol, adx_value):
+    # [تعديل بناءً على الباكتست] تم تخفيف شروط التأكيد (الحجم و OBV) لتتماشى مع النسخة المحسنة
+    # [تصحيح] التأكد من استخدام المفتاح الصحيح من قاموس الإعدادات (bbands_stddev)
     df.ta.bbands(length=params['bbands_period'], std=params['bbands_stddev'], append=True)
     df.ta.kc(length=params['keltner_period'], scalar=params['keltner_atr_multiplier'], append=True)
     df.ta.obv(append=True)
@@ -368,10 +374,15 @@ def analyze_breakout_squeeze_pro(df, params, rvol, adx_value):
     is_in_squeeze = prev[bbl_col] > prev[kcl_col] and prev[bbu_col] < prev[kcu_col]
     if is_in_squeeze:
         breakout_fired = last['close'] > last[bbu_col]
-        volume_ok = not params['volume_confirmation_enabled'] or last['volume'] > df['volume'].rolling(20).mean().iloc[-2] * 1.5
+        # volume_ok أصبح الآن اختياريًا ويتم التحكم به من الإعدادات
+        volume_ok = not params.get('volume_confirmation_enabled', True) or last['volume'] > df['volume'].rolling(20).mean().iloc[-2] * 1.5
         rvol_ok = rvol >= bot_data['settings']['liquidity_filters']['min_rvol']
         obv_rising = df['OBV'].iloc[-2] > df['OBV'].iloc[-3]
-        if breakout_fired and volume_ok and rvol_ok and obv_rising:
+        # التحقق الآن أكثر مرونة. نطلب الاختراق و rvol و obv بشكل أساسي
+        if breakout_fired and rvol_ok and obv_rising:
+            # إذا كان تأكيد الحجم مفعّلاً في الإعدادات، سيتم التحقق منه أيضًا
+            if params.get('volume_confirmation_enabled', True) and not volume_ok:
+                return None
             return {"reason": "Squeeze Breakout", "type": "long"}
     return None
 
@@ -387,7 +398,7 @@ def analyze_rsi_divergence(df, params, rvol, adx_value):
         p_low1_idx, p_low2_idx = price_troughs_idx[-2], price_troughs_idx[-1]
         r_low1_idx, r_low2_idx = rsi_troughs_idx[-2], rsi_troughs_idx[-1]
         is_divergence = (subset.iloc[p_low2_idx]['low'] < subset.iloc[p_low1_idx]['low'] and
-                         subset.iloc[r_low2_idx][rsi_col] > subset.iloc[r_low1_idx][rsi_col])
+                             subset.iloc[r_low2_idx][rsi_col] > subset.iloc[r_low1_idx][rsi_col])
         if is_divergence:
             rsi_exits_oversold = (subset.iloc[r_low1_idx][rsi_col] < 35 and
                                   subset.iloc[-2][rsi_col] > 40)
@@ -474,25 +485,25 @@ async def worker(queue, results_list, settings, failure_counter):
             continue
         try:
             liq_filters, vol_filters, ema_filters = settings['liquidity_filters'], settings['volatility_filters'], settings['ema_trend_filter']
-            
+
             orderbook = await exchange.fetch_order_book(symbol, limit=20)
             if not orderbook or not orderbook['bids'] or not orderbook['asks']:
                 logging.info(f"Reject {symbol}: Could not fetch order book."); continue
-            
+
             best_bid, best_ask = orderbook['bids'][0][0], orderbook['asks'][0][0]
             if best_bid <= 0:
                 logging.info(f"Reject {symbol}: Invalid bid price."); continue
-            
+
             spread_percent = ((best_ask - best_bid) / best_bid) * 100
             if spread_percent > liq_filters['max_spread_percent']:
                 logging.info(f"Reject {symbol}: High Spread ({spread_percent:.2f}% > {liq_filters['max_spread_percent']}%)"); continue
-            
+
             ohlcv = await exchange.fetch_ohlcv(symbol, TIMEFRAME, limit=200)
             if len(ohlcv) < 100:
                 logging.info(f"Skipping {symbol}: Not enough data ({len(ohlcv)} candles)."); continue
-            
+
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']); df.set_index(pd.to_datetime(df['timestamp'], unit='ms'), inplace=True)
-            
+
             # [LOGIC FIX] Calculate SMA before checking it
             df['volume_sma'] = ta.sma(df['volume'], length=liq_filters['rvol_period'])
             if pd.isna(df['volume_sma'].iloc[-2]) or df['volume_sma'].iloc[-2] <= 0:
@@ -501,37 +512,37 @@ async def worker(queue, results_list, settings, failure_counter):
             rvol = df['volume'].iloc[-2] / df['volume_sma'].iloc[-2]
             if rvol < liq_filters['min_rvol']:
                 logging.info(f"Reject {symbol}: Low RVOL ({rvol:.2f} < {liq_filters['min_rvol']})"); continue
-            
+
             atr_col_name = f"ATRr_{vol_filters['atr_period_for_filter']}"
             df.ta.atr(length=vol_filters['atr_period_for_filter'], append=True)
             last_close = df['close'].iloc[-2]
             if last_close <= 0:
                 logging.info(f"Skipping {symbol}: Invalid close price."); continue
-            
+
             atr_percent = (df[atr_col_name].iloc[-2] / last_close) * 100
             if atr_percent < vol_filters['min_atr_percent']:
                 logging.info(f"Reject {symbol}: Low ATR% ({atr_percent:.2f}% < {vol_filters['min_atr_percent']}%)"); continue
-            
+
             # [LOGIC FIX] Always calculate EMA for scanners, but only filter if enabled
             ema_col_name = f"EMA_{ema_filters['ema_period']}"
             df.ta.ema(length=ema_filters['ema_period'], append=True)
             if ema_filters['enabled']:
                 if pd.isna(df[ema_col_name].iloc[-2]) or last_close < df[ema_col_name].iloc[-2]:
                     logging.info(f"Reject {symbol}: Below EMA{ema_filters['ema_period']}"); continue
-            
+
             if settings.get('use_master_trend_filter'):
                 is_htf_bullish, reason = await get_higher_timeframe_trend(exchange, symbol, settings['master_trend_filter_ma_period'])
                 if not is_htf_bullish:
                     logging.info(f"HTF Trend Filter FAILED for {symbol}: {reason}"); continue
-            
+
             df.ta.adx(append=True)
             adx_col = find_col(df.columns, 'ADX_')
             adx_value = df[adx_col].iloc[-2] if adx_col and pd.notna(df[adx_col].iloc[-2]) else 0
             if settings.get('use_master_trend_filter') and adx_value < settings['master_adx_filter_level']:
                 logging.info(f"ADX Filter FAILED for {symbol}: {adx_value:.2f} < {settings['master_adx_filter_level']}"); continue
-            
+
             confirmed_reasons = [result['reason'] for scanner_name in settings['active_scanners'] if (result := SCANNERS[scanner_name](df.copy(), settings.get(scanner_name, {}), rvol, adx_value)) and result.get("type") == "long"]
-            
+
             if confirmed_reasons and len(confirmed_reasons) >= settings.get("min_signal_strength", 1):
                 reason_str = ' + '.join(confirmed_reasons)
                 logging.info(f"SIGNAL FOUND for {symbol} via {reason_str}")
@@ -543,7 +554,7 @@ async def worker(queue, results_list, settings, failure_counter):
                     stop_loss, take_profit = entry_price - risk_per_unit, entry_price + (risk_per_unit * settings['risk_reward_ratio'])
                 else:
                     stop_loss, take_profit = entry_price * (1 - settings['stop_loss_percentage'] / 100), entry_price * (1 + settings['take_profit_percentage'] / 100)
-                
+
                 tp_percent = ((take_profit - entry_price) / entry_price * 100)
                 sl_percent = ((entry_price - stop_loss) / entry_price * 100)
                 min_filters = settings['min_tp_sl_filter']
@@ -680,15 +691,50 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
         if not original_trade: continue
         status = result['status']
         if status in ['ناجحة', 'فاشلة']:
+            # --- MERGE START: Detailed Trade Closure Message Logic ---
             pnl_usdt = (result['exit_price'] - original_trade['entry_price']) * original_trade['quantity']
             portfolio_pnl += pnl_usdt
             closed_at_str = datetime.now(EGYPT_TZ).strftime('%Y-%m-%d %H:%M:%S')
             updates_to_db.append(("UPDATE trades SET status=?, exit_price=?, closed_at=?, exit_value_usdt=?, pnl_usdt=? WHERE id=?", (status, result['exit_price'], closed_at_str, result['exit_price'] * original_trade['quantity'], pnl_usdt, result['id'])))
             pnl_percent = (pnl_usdt / original_trade['entry_value_usdt'] * 100) if original_trade.get('entry_value_usdt', 0) > 0 else 0
+
+            # Calculate duration
+            duration_str = "N/A"
+            try:
+                entry_time = datetime.strptime(original_trade['timestamp'], '%Y-%m-%d %H:%M:%S')
+                close_time = datetime.strptime(closed_at_str, '%Y-%m-%d %H:%M:%S')
+                duration = close_time - entry_time
+                days, remainder = divmod(duration.total_seconds(), 86400)
+                hours, remainder = divmod(remainder, 3600)
+                minutes, _ = divmod(remainder, 60)
+                parts = []
+                if int(days) > 0: parts.append(f"{int(days)} يوم")
+                if int(hours) > 0: parts.append(f"{int(hours)} ساعة")
+                if int(minutes) > 0 or not parts: parts.append(f"{int(minutes)} دقيقة")
+                duration_str = "، ".join(parts)
+            except Exception as e:
+                logging.warning(f"Could not calculate duration for trade #{original_trade['id']}: {e}")
+
+            # Build the detailed message
             icon = "✅" if pnl_usdt >= 0 else "❌"
-            reason_str = "تم ضرب الهدف" if status == 'ناجحة' else "تم ضرب الوقف"
-            message = f"{icon} *إغلاق صفقة #{original_trade['id']}* | `{original_trade['symbol']}`\n*السبب:* {reason_str}\n*الربح/الخسارة:* `${pnl_usdt:+.2f}` (`{pnl_percent:+.2f}%)`"
+            reason_str = "تم تحقيق الهدف" if status == 'ناجحة' else "تم ضرب وقف الخسارة"
+            reason_icon = "🎯" if status == 'ناجحة' else "🛑"
+            def format_price(price): return f"{price:,.8f}" if price < 0.01 else f"{price:,.4f}"
+
+            message = (
+                f"{icon} **تم إغلاق الصفقة #{original_trade['id']}** {icon}\n\n"
+                f"{reason_icon} **السبب:** *{reason_str}*\n"
+                f"━━━━━━━━━━━━━━\n"
+                f"▫️ **العملة:** `{original_trade['symbol']}`\n"
+                f"▫️ **الاستراتيجية:** `{original_trade.get('reason', 'N/A')}`\n"
+                f"▫️ **مدة الصفقة:** `{duration_str}`\n"
+                f"━━━━━━━━━━━━━━\n"
+                f"📈 **سعر الدخول:** `{format_price(original_trade['entry_price'])}`\n"
+                f"📉 **سعر الخروج:** `{format_price(result['exit_price'])}`\n"
+                f"💰 **الربح/الخسارة:** **`${pnl_usdt:+.2f}`** (`{pnl_percent:+.2f}%`)"
+            )
             await send_telegram_message(context.bot, {'custom_message': message, 'target_chat': TELEGRAM_SIGNAL_CHANNEL_ID})
+            # --- MERGE END ---
         elif status == 'update_tsl':
             updates_to_db.append(("UPDATE trades SET stop_loss=?, highest_price=?, trailing_sl_active=? WHERE id=?", (result['new_sl'], result['highest_price'], True, result['id'])))
             await send_telegram_message(context.bot, {**original_trade, **result}, update_type='tsl_activation')
@@ -765,7 +811,7 @@ def generate_performance_report_string():
 main_menu_keyboard = [["📊 الإحصائيات", "📈 الصفقات النشطة"], ["📜 تقرير الاستراتيجيات", "⚙️ الإعدادات"], ["👀 ماذا يجري في الخلفية؟", "🔬 فحص يدوي الآن"],["ℹ️ مساعدة"]]
 settings_menu_keyboard = [["🎭 تفعيل/تعطيل الماسحات", "🏁 أنماط جاهزة"], ["🔧 تعديل المعايير", "🔙 القائمة الرئيسية"]]
 
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("أهلاً بك في بوت المحلل الآلي! (v32 - Final)", reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True))
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("أهلاً بك في بوت المحلل الآلي! (v33 - Merged)", reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True))
 async def scan_now_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if bot_data['status_snapshot'].get('scan_in_progress', False): await update.message.reply_text("⚠️ فحص آخر قيد التنفيذ."); return
     await update.message.reply_text("⏳ جاري بدء الفحص اليدوي..."); context.job_queue.run_once(perform_scan, 0, name='manual_scan')
@@ -879,7 +925,7 @@ async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ جاري إعداد تقرير التشخيص الشامل...")
     settings = bot_data.get("settings", {})
     parts = ["🩺 *تقرير التشخيص والحالة* 🩺"]
-    
+
     # [FEATURE] Add market mood to debug report
     mood_info = settings.get("last_market_mood", {})
     parts.append("\n*--- تحليل السوق الأساسي ---*")
@@ -892,28 +938,28 @@ async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     parts.append("\n*--- الإعدادات العامة ---*")
     active_preset = settings.get("active_preset_name", "N/A"); active_scanners = ", ".join(settings.get("active_scanners", ["None"]))
     parts.extend([f"- *النمط النشط:* `{active_preset}`", f"- *الماسحات النشطة:* `{active_scanners}`"])
-    
+
     parts.append("\n*--- إعدادات المخاطر ---*")
     balance = settings.get('virtual_portfolio_balance_usdt', 0); trade_size = settings.get('virtual_trade_size_percentage', 0)
     sl_multiplier = settings.get('atr_sl_multiplier', 0); rr_ratio = settings.get('risk_reward_ratio', 0)
     parts.extend([f"- *رأس المال الافتراضي:* `${balance:,.2f}`", f"- *حجم الصفقة:* `{trade_size}%` من رأس المال", f"- *مضاعف وقف الخسارة (ATR):* `{sl_multiplier}`", f"- *نسبة المخاطرة/العائد:* `1:{rr_ratio}`"])
-    
+
     parts.append("\n*--- حالة المهام المجدولة ---*")
     if context.job_queue and context.job_queue.jobs():
         for job in context.job_queue.jobs():
             if job.next_t: parts.append(f"- *المهمة:* `{job.name}` | *التشغيل التالي:* `{job.next_t.astimezone(ZoneInfo('UTC')).strftime('%H:%M:%S')} (UTC)`")
             else: parts.append(f"- *المهمة:* `{job.name}` | *الحالة:* `غير مجدولة`")
     else: parts.append("- `🔴 لا توجد مهام مجدولة!`")
-    
+
     parts.append("\n*--- حالة الاتصال بالمنصات ---*")
     for ex_id in EXCHANGES_TO_SCAN: parts.append(f"- *{ex_id.capitalize()}:* {'✅ متصل' if ex_id in bot_data.get('exchanges', {}) else '❌ غير متصل'}")
-    
+
     parts.append("\n*--- حالة قاعدة البيانات ---*")
     try:
         conn = sqlite3.connect(DB_FILE, timeout=5); cursor = conn.cursor(); cursor.execute("SELECT COUNT(*) FROM trades"); total_trades = cursor.fetchone()[0]; conn.close()
         parts.extend([f"- *الاتصال:* `✅ ناجح`", f"- *إجمالي الصفقات المسجلة:* `{total_trades}`"])
     except Exception as e: parts.extend([f"- *الاتصال:* `❌ فشل!`", f"- *الخطأ:* `{e}`"])
-    
+
     await update.message.reply_text("\n".join(parts), parse_mode=ParseMode.MARKDOWN)
 
 async def check_trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE, trade_id_from_callback=None):
@@ -1018,7 +1064,7 @@ async def main_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.edit_message_text(chat_id=chat_id, message_id=settings_menu_id, text="❌ قيمة غير صالحة. الرجاء المحاولة مرة أخرى.")
                 context.job_queue.run_once(lambda _: show_parameters_menu(update, context), 3)
         return
-    
+
     handlers = {"📊 الإحصائيات": stats_command, "📈 الصفقات النشطة": show_active_trades_command, "ℹ️ مساعدة": help_command, "⚙️ الإعدادات": show_settings_menu, "👀 ماذا يجري في الخلفية؟": background_status_command, "🔬 فحص يدوي الآن": scan_now_command, "🔧 تعديل المعايير": show_parameters_menu, "🔙 القائمة الرئيسية": start_command, "🔙 قائمة الإعدادات": show_settings_menu, "🎭 تفعيل/تعطيل الماسحات": show_scanners_menu, "🏁 أنماط جاهزة": show_presets_menu, "📜 تقرير الاستراتيجيات": strategy_report_command,}
     if handler := handlers.get(update.message.text): await handler(update, context)
 
@@ -1036,7 +1082,7 @@ async def post_init(application: Application):
     job_queue.run_repeating(track_open_trades, interval=TRACK_INTERVAL_SECONDS, first=20, name='track_open_trades')
     job_queue.run_daily(send_daily_report, time=dt_time(hour=23, minute=55, tzinfo=EGYPT_TZ), name='daily_report')
     logging.info(f"Jobs scheduled. Daily report at 23:55 {EGYPT_TZ}.")
-    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *المحلل الآلي جاهز للعمل! (v32)*", parse_mode=ParseMode.MARKDOWN)
+    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *المحلل الآلي جاهز للعمل! (v33 - Merged)*", parse_mode=ParseMode.MARKDOWN)
     logging.info("Post-init finished.")
 async def post_shutdown(application: Application): await asyncio.gather(*[ex.close() for ex in bot_data["exchanges"].values()]); logging.info("All exchange connections closed.")
 
@@ -1044,7 +1090,7 @@ def main():
     print("🚀 Starting Pro Trading Analyzer Bot...")
     load_settings(); init_database()
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).post_shutdown(post_shutdown).build()
-    
+
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("scan", scan_now_command))
     application.add_handler(CommandHandler("report", daily_report_command))
@@ -1054,7 +1100,7 @@ def main():
     application.add_handler(CallbackQueryHandler(button_callback_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, main_text_handler))
     application.add_error_handler(error_handler)
-    
+
     print("✅ Bot is now running and polling for updates...")
     application.run_polling()
 
@@ -1063,4 +1109,3 @@ if __name__ == '__main__':
         main()
     except Exception as e:
         logging.critical(f"Bot stopped due to a critical unhandled error: {e}", exc_info=True)
-
