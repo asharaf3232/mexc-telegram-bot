@@ -61,14 +61,14 @@ SCAN_INTERVAL_SECONDS = 900
 TRACK_INTERVAL_SECONDS = 120
 
 APP_ROOT = '.'
-DB_FILE = os.path.join(APP_ROOT, 'trading_bot_v29.db')
-SETTINGS_FILE = os.path.join(APP_ROOT, 'settings_v29.json')
+DB_FILE = os.path.join(APP_ROOT, 'trading_bot_v30.db')
+SETTINGS_FILE = os.path.join(APP_ROOT, 'settings_v30.json')
 
 
 EGYPT_TZ = ZoneInfo("Africa/Cairo")
 
 # --- إعداد مسجل الأحداث (Logger) --- #
-LOG_FILE = os.path.join(APP_ROOT, 'bot_v29.log')
+LOG_FILE = os.path.join(APP_ROOT, 'bot_v30.log')
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO, handlers=[logging.FileHandler(LOG_FILE, 'w'), logging.StreamHandler()])
 logging.getLogger('httpx').setLevel(logging.WARNING)
 logging.getLogger('apscheduler').setLevel(logging.WARNING)
@@ -461,14 +461,14 @@ async def get_higher_timeframe_trend(exchange, symbol, ma_period):
     except Exception as e:
         return None, f"Error: {e}"
 
-# [FINAL FIX] Corrected the task_done() logic to prevent crashes
+# [LOGIC FIX] Corrected the task_done() logic to prevent crashes
 async def worker(queue, results_list, settings, failure_counter):
     while not queue.empty():
         market_info = await queue.get()
         symbol = market_info.get('symbol', 'N/A')
         exchange = bot_data["exchanges"].get(market_info['exchange'])
         if not exchange or not settings.get('active_scanners'):
-            queue.task_done() 
+            queue.task_done()
             continue
         try:
             liq_filters, vol_filters, ema_filters = settings['liquidity_filters'], settings['volatility_filters'], settings['ema_trend_filter']
@@ -484,30 +484,39 @@ async def worker(queue, results_list, settings, failure_counter):
             ohlcv = await exchange.fetch_ohlcv(symbol, TIMEFRAME, limit=200)
             if len(ohlcv) < 100:
                 logging.info(f"Skipping {symbol}: Not enough data ({len(ohlcv)} candles)."); continue
+            
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']); df.set_index(pd.to_datetime(df['timestamp'], unit='ms'), inplace=True)
-            if df['volume'].iloc[-2] == 0 or df['volume_sma'].iloc[-2] <= 0:
-                logging.info(f"Skipping {symbol}: Invalid volume data."); continue
+            
+            # [LOGIC FIX] Calculate SMA before checking it
             df['volume_sma'] = ta.sma(df['volume'], length=liq_filters['rvol_period'])
+            if df['volume_sma'].iloc[-2] <= 0:
+                logging.info(f"Skipping {symbol}: Invalid SMA volume."); continue
+
             rvol = df['volume'].iloc[-2] / df['volume_sma'].iloc[-2]
             if rvol < liq_filters['min_rvol']:
                 logging.info(f"Reject {symbol}: Low RVOL ({rvol:.2f} < {liq_filters['min_rvol']})"); continue
+            
             atr_col_name = f"ATRr_{vol_filters['atr_period_for_filter']}"
             df.ta.atr(length=vol_filters['atr_period_for_filter'], append=True)
             last_close = df['close'].iloc[-2]
             if last_close <= 0:
                 logging.info(f"Skipping {symbol}: Invalid close price."); continue
+            
             atr_percent = (df[atr_col_name].iloc[-2] / last_close) * 100
             if atr_percent < vol_filters['min_atr_percent']:
                 logging.info(f"Reject {symbol}: Low ATR% ({atr_percent:.2f}% < {vol_filters['min_atr_percent']}%)"); continue
+            
             if ema_filters['enabled']:
                 ema_col_name = f"EMA_{ema_filters['ema_period']}"
                 df.ta.ema(length=ema_filters['ema_period'], append=True)
                 if last_close < df[ema_col_name].iloc[-2]:
                     logging.info(f"Reject {symbol}: Below EMA{ema_filters['ema_period']}"); continue
+            
             if settings.get('use_master_trend_filter'):
                 is_htf_bullish, reason = await get_higher_timeframe_trend(exchange, symbol, settings['master_trend_filter_ma_period'])
                 if not is_htf_bullish:
                     logging.info(f"HTF Trend Filter FAILED for {symbol}: {reason}"); continue
+            
             df.ta.adx(append=True)
             adx_col = find_col(df.columns, 'ADX_')
             adx_value = df[adx_col].iloc[-2] if adx_col and pd.notna(df[adx_col].iloc[-2]) else 0
@@ -742,7 +751,7 @@ def generate_performance_report_string():
 main_menu_keyboard = [["📊 الإحصائيات", "📈 الصفقات النشطة"], ["📜 تقرير الاستراتيجيات", "⚙️ الإعدادات"], ["👀 ماذا يجري في الخلفية؟", "🔬 فحص يدوي الآن"],["ℹ️ مساعدة"]]
 settings_menu_keyboard = [["🎭 تفعيل/تعطيل الماسحات", "🏁 أنماط جاهزة"], ["🔧 تعديل المعايير", "🔙 القائمة الرئيسية"]]
 
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("أهلاً بك في بوت المحلل الآلي! (v28 - Alpha Vantage)", reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True))
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("أهلاً بك في بوت المحلل الآلي! (v29 - Final Fix)", reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True))
 async def scan_now_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if bot_data['status_snapshot'].get('scan_in_progress', False): await update.message.reply_text("⚠️ فحص آخر قيد التنفيذ."); return
     await update.message.reply_text("⏳ جاري بدء الفحص اليدوي..."); context.job_queue.run_once(perform_scan, 0, name='manual_scan')
