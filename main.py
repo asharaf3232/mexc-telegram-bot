@@ -163,7 +163,9 @@ DEFAULT_SETTINGS = {
     "ema_trend_filter": {"enabled": True, "ema_period": 200},
     "min_tp_sl_filter": {"min_tp_percent": 1.0, "min_sl_percent": 0.5},
     "min_signal_strength": 1,
-    "active_preset_name": "Default"
+    "active_preset_name": "Default",
+    # [FEATURE] Save last market mood
+    "last_market_mood": {"timestamp": "N/A", "mood": "UNKNOWN", "reason": "No scan performed yet."}
 }
 
 
@@ -176,6 +178,7 @@ def load_settings():
                 if key not in bot_data["settings"]:
                     bot_data["settings"][key] = value; updated = True
                 elif isinstance(value, dict):
+                    # Ensure nested dictionaries also get new keys
                     for sub_key, sub_value in value.items():
                         if sub_key not in bot_data["settings"].get(key, {}):
                             bot_data["settings"][key][sub_key] = sub_value; updated = True
@@ -308,7 +311,7 @@ async def get_fundamental_market_mood():
     """
     high_impact_events = get_alpha_vantage_economic_events()
     if high_impact_events is None:
-        return "DANGEROUS", -1.0, "فشل جلب البيانات الاقتصادية من Alpha Vantage"
+        return "DANGEROUS", -1.0, "فشل جلب البيانات الاقتصادية"
     if high_impact_events:
         return "DANGEROUS", -0.9, f"أحداث هامة اليوم: {', '.join(high_impact_events)}"
 
@@ -398,7 +401,7 @@ def analyze_supertrend_pullback(df, params, rvol, adx_value):
     df.ta.supertrend(length=params['atr_period'], multiplier=params['atr_multiplier'], append=True)
     st_dir_col = find_col(df.columns, f"SUPERTd_{params['atr_period']}_")
     ema_col = find_col(df.columns, 'EMA_')
-    if not st_dir_col or not ema_col: return None
+    if not st_dir_col or not ema_col or pd.isna(df[ema_col].iloc[-2]): return None
     last, prev = df.iloc[-2], df.iloc[-3]
     if prev[st_dir_col] == -1 and last[st_dir_col] == 1:
         settings = bot_data['settings']
@@ -509,7 +512,7 @@ async def worker(queue, results_list, settings, failure_counter):
             if atr_percent < vol_filters['min_atr_percent']:
                 logging.info(f"Reject {symbol}: Low ATR% ({atr_percent:.2f}% < {vol_filters['min_atr_percent']}%)"); continue
             
-            # [LOGIC FIX] Always calculate EMA, but only filter if enabled
+            # [LOGIC FIX] Always calculate EMA for scanners, but only filter if enabled
             ema_col_name = f"EMA_{ema_filters['ema_period']}"
             df.ta.ema(length=ema_filters['ema_period'], append=True)
             if ema_filters['enabled']:
@@ -560,7 +563,14 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
             logging.warning("Scan attempted while another was in progress. Skipped."); return
         settings = bot_data["settings"]
         if settings.get('fundamental_analysis_enabled', True):
-            mood, _, mood_reason = await get_fundamental_market_mood()
+            mood, mood_score, mood_reason = await get_fundamental_market_mood()
+            # [FEATURE] Save the latest mood to settings
+            bot_data['settings']['last_market_mood'] = {
+                "timestamp": datetime.now(EGYPT_TZ).strftime('%Y-%m-%d %H:%M'),
+                "mood": mood,
+                "reason": mood_reason
+            }
+            save_settings()
             logging.info(f"Fundamental Market Mood: {mood} - Reason: {mood_reason}")
             if mood in ["NEGATIVE", "DANGEROUS"]:
                 await send_telegram_message(context.bot, {'custom_message': f"⚠️ *إيقاف الفحص: مزاج السوق سلبي/خطر*\n- السبب: {mood_reason}", 'target_chat': TELEGRAM_CHAT_ID}); return
@@ -755,7 +765,7 @@ def generate_performance_report_string():
 main_menu_keyboard = [["📊 الإحصائيات", "📈 الصفقات النشطة"], ["📜 تقرير الاستراتيجيات", "⚙️ الإعدادات"], ["👀 ماذا يجري في الخلفية؟", "🔬 فحص يدوي الآن"],["ℹ️ مساعدة"]]
 settings_menu_keyboard = [["🎭 تفعيل/تعطيل الماسحات", "🏁 أنماط جاهزة"], ["🔧 تعديل المعايير", "🔙 القائمة الرئيسية"]]
 
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("أهلاً بك في بوت المحلل الآلي! (v31 - Final Logic Fix)", reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True))
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("أهلاً بك في بوت المحلل الآلي! (v32 - Final)", reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True))
 async def scan_now_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if bot_data['status_snapshot'].get('scan_in_progress', False): await update.message.reply_text("⚠️ فحص آخر قيد التنفيذ."); return
     await update.message.reply_text("⏳ جاري بدء الفحص اليدوي..."); context.job_queue.run_once(perform_scan, 0, name='manual_scan')
@@ -864,30 +874,48 @@ async def background_status_command(update: Update, context: ContextTypes.DEFAUL
                f"- *آخر فحص:* `{status['last_scan_end_time']}`\n- *العملات المفحوصة:* `{status['markets_found']}`\n"
                f"- *الإشارات الجديدة:* `{status['signals_found']}`\n- *الصفقات النشطة:* `{status['active_trades_count']}`\n- *الفحص التالي:* `{next_scan_time}`")
     await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
+
 async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ جاري إعداد تقرير التشخيص الشامل...")
-    settings = bot_data.get("settings", {}); parts = ["🩺 *تقرير التشخيص والحالة* 🩺"]
+    settings = bot_data.get("settings", {})
+    parts = ["🩺 *تقرير التشخيص والحالة* 🩺"]
+    
+    # [FEATURE] Add market mood to debug report
+    mood_info = settings.get("last_market_mood", {})
+    parts.append("\n*--- تحليل السوق الأساسي ---*")
+    parts.extend([
+        f"- *آخر تحديث:* `{mood_info.get('timestamp', 'N/A')}`",
+        f"- *مزاج السوق:* `{mood_info.get('mood', 'N/A')}`",
+        f"- *السبب:* `{mood_info.get('reason', 'N/A')}`"
+    ])
+
     parts.append("\n*--- الإعدادات العامة ---*")
     active_preset = settings.get("active_preset_name", "N/A"); active_scanners = ", ".join(settings.get("active_scanners", ["None"]))
     parts.extend([f"- *النمط النشط:* `{active_preset}`", f"- *الماسحات النشطة:* `{active_scanners}`"])
+    
     parts.append("\n*--- إعدادات المخاطر ---*")
     balance = settings.get('virtual_portfolio_balance_usdt', 0); trade_size = settings.get('virtual_trade_size_percentage', 0)
     sl_multiplier = settings.get('atr_sl_multiplier', 0); rr_ratio = settings.get('risk_reward_ratio', 0)
     parts.extend([f"- *رأس المال الافتراضي:* `${balance:,.2f}`", f"- *حجم الصفقة:* `{trade_size}%` من رأس المال", f"- *مضاعف وقف الخسارة (ATR):* `{sl_multiplier}`", f"- *نسبة المخاطرة/العائد:* `1:{rr_ratio}`"])
+    
     parts.append("\n*--- حالة المهام المجدولة ---*")
     if context.job_queue and context.job_queue.jobs():
         for job in context.job_queue.jobs():
             if job.next_t: parts.append(f"- *المهمة:* `{job.name}` | *التشغيل التالي:* `{job.next_t.astimezone(ZoneInfo('UTC')).strftime('%H:%M:%S')} (UTC)`")
             else: parts.append(f"- *المهمة:* `{job.name}` | *الحالة:* `غير مجدولة`")
     else: parts.append("- `🔴 لا توجد مهام مجدولة!`")
+    
     parts.append("\n*--- حالة الاتصال بالمنصات ---*")
     for ex_id in EXCHANGES_TO_SCAN: parts.append(f"- *{ex_id.capitalize()}:* {'✅ متصل' if ex_id in bot_data.get('exchanges', {}) else '❌ غير متصل'}")
+    
     parts.append("\n*--- حالة قاعدة البيانات ---*")
     try:
         conn = sqlite3.connect(DB_FILE, timeout=5); cursor = conn.cursor(); cursor.execute("SELECT COUNT(*) FROM trades"); total_trades = cursor.fetchone()[0]; conn.close()
         parts.extend([f"- *الاتصال:* `✅ ناجح`", f"- *إجمالي الصفقات المسجلة:* `{total_trades}`"])
     except Exception as e: parts.extend([f"- *الاتصال:* `❌ فشل!`", f"- *الخطأ:* `{e}`"])
+    
     await update.message.reply_text("\n".join(parts), parse_mode=ParseMode.MARKDOWN)
+
 async def check_trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE, trade_id_from_callback=None):
     target = update.callback_query.message if trade_id_from_callback else update.message
     def format_price(price): return f"{price:,.8f}" if price < 0.01 else f"{price:,.4f}"
@@ -1008,7 +1036,7 @@ async def post_init(application: Application):
     job_queue.run_repeating(track_open_trades, interval=TRACK_INTERVAL_SECONDS, first=20, name='track_open_trades')
     job_queue.run_daily(send_daily_report, time=dt_time(hour=23, minute=55, tzinfo=EGYPT_TZ), name='daily_report')
     logging.info(f"Jobs scheduled. Daily report at 23:55 {EGYPT_TZ}.")
-    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *المحلل الآلي جاهز للعمل! (v31)*", parse_mode=ParseMode.MARKDOWN)
+    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *المحلل الآلي جاهز للعمل! (v32)*", parse_mode=ParseMode.MARKDOWN)
     logging.info("Post-init finished.")
 async def post_shutdown(application: Application): await asyncio.gather(*[ex.close() for ex in bot_data["exchanges"].values()]); logging.info("All exchange connections closed.")
 
@@ -1035,3 +1063,4 @@ if __name__ == '__main__':
         main()
     except Exception as e:
         logging.critical(f"Bot stopped due to a critical unhandled error: {e}", exc_info=True)
+
