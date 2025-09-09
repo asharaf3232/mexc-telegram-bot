@@ -30,7 +30,7 @@ from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
 from telegram.error import BadRequest, RetryAfter, TimedOut
 
-try:
+4try:
     from scipy.signal import find_peaks
     SCIPY_AVAILABLE = True
 except ImportError:
@@ -42,7 +42,6 @@ except ImportError:
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', 'YOUR_BOT_TOKEN_HERE')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID', 'YOUR_CHAT_ID_HERE')
 TELEGRAM_SIGNAL_CHANNEL_ID = os.getenv('TELEGRAM_SIGNAL_CHANNEL_ID', TELEGRAM_CHAT_ID)
-# [API UPGRADE] استخدام مفتاح Alpha Vantage
 ALPHA_VANTAGE_API_KEY = os.getenv('ALPHA_VANTAGE_API_KEY', 'YOUR_AV_KEY_HERE')
 
 
@@ -61,7 +60,7 @@ SCAN_INTERVAL_SECONDS = 900
 TRACK_INTERVAL_SECONDS = 120
 
 APP_ROOT = '.'
-# --- MERGE: Updated version number ---
+# [تحسين] تم تحديث الإصدار إلى v33 لتجنب التعارض مع الملفات القديمة
 DB_FILE = os.path.join(APP_ROOT, 'trading_bot_v33.db')
 SETTINGS_FILE = os.path.join(APP_ROOT, 'settings_v33.json')
 
@@ -70,11 +69,14 @@ EGYPT_TZ = ZoneInfo("Africa/Cairo")
 
 # --- إعداد مسجل الأحداث (Logger) --- #
 LOG_FILE = os.path.join(APP_ROOT, 'bot_v33.log')
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO, handlers=[logging.FileHandler(LOG_FILE, 'w'), logging.StreamHandler()])
+# [تحسين] تغيير اسم ملف السجل ليتوافق مع الإصدار الجديد
+logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO, handlers=[logging.FileHandler(LOG_FILE, 'a'), logging.StreamHandler()])
 logging.getLogger('httpx').setLevel(logging.WARNING)
 logging.getLogger('apscheduler').setLevel(logging.WARNING)
 logging.getLogger('telegram').setLevel(logging.WARNING)
 logging.getLogger('requests').setLevel(logging.WARNING)
+# [تحسين] تغيير اسم الجذر (root) في السجل إلى اسم البوت لتسهيل القراءة
+logger = logging.getLogger("TradingBot")
 
 
 # --- Preset Configurations ---
@@ -165,7 +167,6 @@ DEFAULT_SETTINGS = {
     "min_tp_sl_filter": {"min_tp_percent": 1.0, "min_sl_percent": 0.5},
     "min_signal_strength": 1,
     "active_preset_name": "Default",
-    # [FEATURE] Save last market mood
     "last_market_mood": {"timestamp": "N/A", "mood": "UNKNOWN", "reason": "No scan performed yet."}
 }
 
@@ -179,7 +180,6 @@ def load_settings():
                 if key not in bot_data["settings"]:
                     bot_data["settings"][key] = value; updated = True
                 elif isinstance(value, dict):
-                    # Ensure nested dictionaries also get new keys
                     for sub_key, sub_value in value.items():
                         if sub_key not in bot_data["settings"].get(key, {}):
                             bot_data["settings"][key][sub_key] = sub_value; updated = True
@@ -187,18 +187,18 @@ def load_settings():
         else:
             bot_data["settings"] = DEFAULT_SETTINGS
             save_settings()
-        logging.info(f"Settings loaded successfully from {SETTINGS_FILE}")
+        logger.info(f"Settings loaded successfully from {SETTINGS_FILE}")
     except Exception as e:
-        logging.error(f"Failed to load settings: {e}")
+        logger.error(f"Failed to load settings: {e}")
         bot_data["settings"] = DEFAULT_SETTINGS
 
 
 def save_settings():
     try:
         with open(SETTINGS_FILE, 'w') as f: json.dump(bot_data["settings"], f, indent=4)
-        logging.info(f"Settings saved successfully to {SETTINGS_FILE}")
+        logger.info(f"Settings saved successfully to {SETTINGS_FILE}")
     except Exception as e:
-        logging.error(f"Failed to save settings: {e}")
+        logger.error(f"Failed to save settings: {e}")
 
 # --- Database Management ---
 def init_database():
@@ -210,9 +210,9 @@ def init_database():
         ''')
         conn.commit()
         conn.close()
-        logging.info(f"Database initialized successfully at: {DB_FILE}")
+        logger.info(f"Database initialized successfully at: {DB_FILE}")
     except Exception as e:
-        logging.error(f"Failed to initialize database at {DB_FILE}: {e}")
+        logger.error(f"Failed to initialize database at {DB_FILE}: {e}")
 
 def log_recommendation_to_db(signal):
     try:
@@ -224,121 +224,88 @@ def log_recommendation_to_db(signal):
         conn.close()
         return trade_id
     except Exception as e:
-        logging.error(f"Failed to log recommendation to DB: {e}")
+        logger.error(f"Failed to log recommendation to DB: {e}")
         return None
 
-# --- [API UPGRADE] Fundamental & News Analysis Section (Using Alpha Vantage) ---
+# --- [API UPGRADE] Fundamental & News Analysis Section ---
 
 def get_alpha_vantage_economic_events():
     """
-    Fetches high-impact economic events for the current day from Alpha Vantage API.
+    Fetches high-impact economic events. Handles premium API errors gracefully.
     """
     if ALPHA_VANTAGE_API_KEY == 'YOUR_AV_KEY_HERE':
-        logging.warning("Alpha Vantage API key is not set. Skipping economic calendar check.")
+        logger.warning("Alpha Vantage API key is not set. Skipping economic calendar check.")
         return []
 
     today_str = datetime.now(timezone.utc).strftime('%Y-%m-%d')
-    params = {
-        'function': 'ECONOMIC_CALENDAR',
-        'horizon': '3month',
-        'apikey': ALPHA_VANTAGE_API_KEY
-    }
+    params = {'function': 'ECONOMIC_CALENDAR', 'horizon': '3month', 'apikey': ALPHA_VANTAGE_API_KEY}
     try:
         response = requests.get('https://www.alphavantage.co/query', params=params, timeout=20)
         response.raise_for_status()
         data_str = response.text
+        
+        # [الحل] التعامل مع خطأ الميزة المدفوعة بشكل أفضل
         if "premium" in data_str.lower():
-             logging.error("Alpha Vantage API returned a premium feature error for Economic Calendar.")
-             return None
+             logger.error("Alpha Vantage API returned a premium feature error for Economic Calendar.")
+             # لا نرجع None، بل قائمة فارغة للإشارة إلى عدم وجود أحداث (أو عدم القدرة على جلبها)
+             return [] 
 
         lines = data_str.strip().split('\r\n')
-        if len(lines) < 2:
-            return []
-
+        if len(lines) < 2: return []
         header = [h.strip() for h in lines[0].split(',')]
-
         high_impact_events = []
         for line in lines[1:]:
             values = [v.strip() for v in line.split(',')]
             event = dict(zip(header, values))
-
-            event_date = event.get('releaseDate', '')
-            impact = event.get('impact', '').lower()
-            country = event.get('country', '')
-
-            if event_date == today_str and impact == 'high' and country in ['USD', 'EUR']:
+            if event.get('releaseDate', '') == today_str and event.get('impact', '').lower() == 'high' and event.get('country', '') in ['USD', 'EUR']:
                 high_impact_events.append(event.get('event', 'Unknown Event'))
-
-        if high_impact_events:
-            logging.warning(f"High-impact events today via Alpha Vantage: {high_impact_events}")
-            return high_impact_events
-
-        return []
+        if high_impact_events: logger.warning(f"High-impact events today via Alpha Vantage: {high_impact_events}")
+        return high_impact_events
     except requests.RequestException as e:
-        logging.error(f"Failed to fetch economic calendar data from Alpha Vantage: {e}")
-        return None
+        logger.error(f"Failed to fetch economic calendar data from Alpha Vantage: {e}")
+        return None # نرجع None هنا فقط في حالة فشل الاتصال الكامل
 
 def get_latest_crypto_news(limit=15):
-    """
-    Fetches the latest news headlines from various sources.
-    """
-    urls = [
-        "https://cointelegraph.com/rss",
-        "https://www.coindesk.com/arc/outboundfeeds/rss/",
-    ]
+    urls = ["https://cointelegraph.com/rss", "https://www.coindesk.com/arc/outboundfeeds/rss/"]
     headlines = []
     for url in urls:
         try:
             feed = feedparser.parse(url)
-            for entry in feed.entries[:5]:
-                headlines.append(entry.title)
+            headlines.extend(entry.title for entry in feed.entries[:5])
         except Exception as e:
-            logging.error(f"Failed to fetch news from {url}: {e}")
+            logger.error(f"Failed to fetch news from {url}: {e}")
     return list(set(headlines))[:limit]
 
 def analyze_sentiment_of_headlines(headlines):
-    """
-    Analyzes a list of news headlines and returns an aggregate sentiment score.
-    """
-    if not headlines or not NLTK_AVAILABLE:
-        return 0.0
+    if not headlines or not NLTK_AVAILABLE: return 0.0
     sia = SentimentIntensityAnalyzer()
     total_compound_score = sum(sia.polarity_scores(headline)['compound'] for headline in headlines)
     return total_compound_score / len(headlines) if headlines else 0.0
 
 async def get_fundamental_market_mood():
-    """
-    Determines the overall market mood based on economic events and news sentiment.
-    """
     high_impact_events = get_alpha_vantage_economic_events()
+    # [الحل] تعديل منطق تحديد الخطر. الآن فقط فشل الاتصال الكامل (None) يسبب حالة الخطر
     if high_impact_events is None:
         return "DANGEROUS", -1.0, "فشل جلب البيانات الاقتصادية"
-    if high_impact_events:
+    if high_impact_events: # إذا كانت القائمة تحتوي على أحداث
         return "DANGEROUS", -0.9, f"أحداث هامة اليوم: {', '.join(high_impact_events)}"
 
     latest_headlines = get_latest_crypto_news()
     sentiment_score = analyze_sentiment_of_headlines(latest_headlines)
-    logging.info(f"Market sentiment score based on news: {sentiment_score:.2f}")
+    logger.info(f"Market sentiment score based on news: {sentiment_score:.2f}")
 
-    if sentiment_score > 0.25:
-        return "POSITIVE", sentiment_score, f"مشاعر إيجابية (الدرجة: {sentiment_score:.2f})"
-    elif sentiment_score < -0.25:
-        return "NEGATIVE", sentiment_score, f"مشاعر سلبية (الدرجة: {sentiment_score:.2f})"
-    else:
-        return "NEUTRAL", sentiment_score, f"مشاعر محايدة (الدرجة: {sentiment_score:.2f})"
+    if sentiment_score > 0.25: return "POSITIVE", sentiment_score, f"مشاعر إيجابية (الدرجة: {sentiment_score:.2f})"
+    elif sentiment_score < -0.25: return "NEGATIVE", sentiment_score, f"مشاعر سلبية (الدرجة: {sentiment_score:.2f})"
+    else: return "NEUTRAL", sentiment_score, f"مشاعر محايدة (الدرجة: {sentiment_score:.2f})"
 
 
 # --- Advanced Scanners ---
 def find_col(df_columns, prefix):
-    try:
-        return next(col for col in df_columns if col.startswith(prefix))
-    except StopIteration:
-        return None
+    try: return next(col for col in df_columns if col.startswith(prefix))
+    except StopIteration: return None
 
 def analyze_momentum_breakout(df, params, rvol, adx_value):
-    # [تعديل بناءً على الباكتست] تم تخفيف شرط حجم التداول الصارم الذي كان يمنع ظهور الإشارات
     df.ta.vwap(append=True)
-    # [تصحيح] التأكد من استخدام المفتاح الصحيح من قاموس الإعدادات (bbands_stddev)
     df.ta.bbands(length=params['bbands_period'], std=params['bbands_stddev'], append=True)
     df.ta.macd(fast=params['macd_fast'], slow=params['macd_slow'], signal=params['macd_signal'], append=True)
     df.ta.rsi(length=params['rsi_period'], append=True)
@@ -350,18 +317,14 @@ def analyze_momentum_breakout(df, params, rvol, adx_value):
     )
     if not all([macd_col, macds_col, bbu_col, rsi_col]): return None
     last, prev = df.iloc[-2], df.iloc[-3]
-    # تم إزالة شرط volume_ok من التحقق النهائي لجعله أقل صرامة
-    # volume_ok = last['volume'] > (df['volume'].rolling(20).mean().iloc[-2] * params['volume_spike_multiplier'])
     rvol_ok = rvol >= bot_data['settings']['liquidity_filters']['min_rvol']
     if (prev[macd_col] <= prev[macds_col] and last[macd_col] > last[macds_col] and
         last['close'] > last[bbu_col] and last['close'] > last["VWAP_D"] and
-        last[rsi_col] < params['rsi_max_level'] and rvol_ok): # لم نعد نطلب volume_ok هنا
+        last[rsi_col] < params['rsi_max_level'] and rvol_ok):
         return {"reason": "Momentum Breakout", "type": "long"}
     return None
 
 def analyze_breakout_squeeze_pro(df, params, rvol, adx_value):
-    # [تعديل بناءً على الباكتست] تم تخفيف شروط التأكيد (الحجم و OBV) لتتماشى مع النسخة المحسنة
-    # [تصحيح] التأكد من استخدام المفتاح الصحيح من قاموس الإعدادات (bbands_stddev)
     df.ta.bbands(length=params['bbands_period'], std=params['bbands_stddev'], append=True)
     df.ta.kc(length=params['keltner_period'], scalar=params['keltner_atr_multiplier'], append=True)
     df.ta.obv(append=True)
@@ -374,15 +337,11 @@ def analyze_breakout_squeeze_pro(df, params, rvol, adx_value):
     is_in_squeeze = prev[bbl_col] > prev[kcl_col] and prev[bbu_col] < prev[kcu_col]
     if is_in_squeeze:
         breakout_fired = last['close'] > last[bbu_col]
-        # volume_ok أصبح الآن اختياريًا ويتم التحكم به من الإعدادات
         volume_ok = not params.get('volume_confirmation_enabled', True) or last['volume'] > df['volume'].rolling(20).mean().iloc[-2] * 1.5
         rvol_ok = rvol >= bot_data['settings']['liquidity_filters']['min_rvol']
         obv_rising = df['OBV'].iloc[-2] > df['OBV'].iloc[-3]
-        # التحقق الآن أكثر مرونة. نطلب الاختراق و rvol و obv بشكل أساسي
         if breakout_fired and rvol_ok and obv_rising:
-            # إذا كان تأكيد الحجم مفعّلاً في الإعدادات، سيتم التحقق منه أيضًا
-            if params.get('volume_confirmation_enabled', True) and not volume_ok:
-                return None
+            if params.get('volume_confirmation_enabled', True) and not volume_ok: return None
             return {"reason": "Squeeze Breakout", "type": "long"}
     return None
 
@@ -398,10 +357,9 @@ def analyze_rsi_divergence(df, params, rvol, adx_value):
         p_low1_idx, p_low2_idx = price_troughs_idx[-2], price_troughs_idx[-1]
         r_low1_idx, r_low2_idx = rsi_troughs_idx[-2], rsi_troughs_idx[-1]
         is_divergence = (subset.iloc[p_low2_idx]['low'] < subset.iloc[p_low1_idx]['low'] and
-                             subset.iloc[r_low2_idx][rsi_col] > subset.iloc[r_low1_idx][rsi_col])
+                         subset.iloc[r_low2_idx][rsi_col] > subset.iloc[r_low1_idx][rsi_col])
         if is_divergence:
-            rsi_exits_oversold = (subset.iloc[r_low1_idx][rsi_col] < 35 and
-                                  subset.iloc[-2][rsi_col] > 40)
+            rsi_exits_oversold = (subset.iloc[r_low1_idx][rsi_col] < 35 and subset.iloc[-2][rsi_col] > 40)
             confirmation_price = subset.iloc[p_low2_idx:]['high'].max()
             price_confirmed = df.iloc[-2]['close'] > confirmation_price
             if (not params['confirm_with_rsi_exit'] or rsi_exits_oversold) and price_confirmed:
@@ -439,9 +397,9 @@ async def initialize_exchanges():
         try:
             await exchange.load_markets()
             bot_data["exchanges"][ex_id] = exchange
-            logging.info(f"Connected to {ex_id} (spot markets only).")
+            logger.info(f"Connected to {ex_id} (spot markets only).")
         except Exception as e:
-            logging.error(f"Failed to connect to {ex_id}: {e}")
+            logger.error(f"Failed to connect to {ex_id}: {e}")
             await exchange.close()
     await asyncio.gather(*[connect(ex_id) for ex_id in EXCHANGES_TO_SCAN])
 
@@ -459,7 +417,7 @@ async def aggregate_top_movers():
     sorted_tickers = sorted(usdt_tickers, key=lambda t: t.get('quoteVolume', 0), reverse=True)
     unique_symbols = {t['symbol']: {'exchange': t['exchange'], 'symbol': t['symbol']} for t in sorted_tickers}
     final_list = list(unique_symbols.values())[:settings['top_n_symbols_by_volume']]
-    logging.info(f"Aggregated markets. Found {len(all_tickers)} tickers -> Post-filter: {len(usdt_tickers)} -> Selected top {len(final_list)} unique pairs.")
+    logger.info(f"Aggregated markets. Found {len(all_tickers)} tickers -> Post-filter: {len(usdt_tickers)} -> Selected top {len(final_list)} unique pairs.")
     bot_data['status_snapshot']['markets_found'] = len(final_list)
     return final_list
 
@@ -488,64 +446,67 @@ async def worker(queue, results_list, settings, failure_counter):
 
             orderbook = await exchange.fetch_order_book(symbol, limit=20)
             if not orderbook or not orderbook['bids'] or not orderbook['asks']:
-                logging.info(f"Reject {symbol}: Could not fetch order book."); continue
+                logger.info(f"Reject {symbol}: Could not fetch order book."); continue
 
             best_bid, best_ask = orderbook['bids'][0][0], orderbook['asks'][0][0]
-            if best_bid <= 0:
-                logging.info(f"Reject {symbol}: Invalid bid price."); continue
+            if best_bid <= 0: logger.info(f"Reject {symbol}: Invalid bid price."); continue
 
             spread_percent = ((best_ask - best_bid) / best_bid) * 100
             if spread_percent > liq_filters['max_spread_percent']:
-                logging.info(f"Reject {symbol}: High Spread ({spread_percent:.2f}% > {liq_filters['max_spread_percent']}%)"); continue
+                logger.info(f"Reject {symbol}: High Spread ({spread_percent:.2f}% > {liq_filters['max_spread_percent']}%)"); continue
 
-            ohlcv = await exchange.fetch_ohlcv(symbol, TIMEFRAME, limit=200)
-            if len(ohlcv) < 100:
-                logging.info(f"Skipping {symbol}: Not enough data ({len(ohlcv)} candles)."); continue
+            ohlcv = await exchange.fetch_ohlcv(symbol, TIMEFRAME, limit=220) # طلب شموع إضافية لضمان حساب EMA200
+            if len(ohlcv) < ema_filters['ema_period']:
+                logger.info(f"Skipping {symbol}: Not enough data ({len(ohlcv)} candles) for EMA calculation."); continue
 
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']); df.set_index(pd.to_datetime(df['timestamp'], unit='ms'), inplace=True)
 
-            # [LOGIC FIX] Calculate SMA before checking it
             df['volume_sma'] = ta.sma(df['volume'], length=liq_filters['rvol_period'])
             if pd.isna(df['volume_sma'].iloc[-2]) or df['volume_sma'].iloc[-2] <= 0:
-                logging.info(f"Skipping {symbol}: Invalid SMA volume."); continue
+                logger.info(f"Skipping {symbol}: Invalid SMA volume."); continue
 
             rvol = df['volume'].iloc[-2] / df['volume_sma'].iloc[-2]
             if rvol < liq_filters['min_rvol']:
-                logging.info(f"Reject {symbol}: Low RVOL ({rvol:.2f} < {liq_filters['min_rvol']})"); continue
+                logger.info(f"Reject {symbol}: Low RVOL ({rvol:.2f} < {liq_filters['min_rvol']})"); continue
 
             atr_col_name = f"ATRr_{vol_filters['atr_period_for_filter']}"
             df.ta.atr(length=vol_filters['atr_period_for_filter'], append=True)
             last_close = df['close'].iloc[-2]
-            if last_close <= 0:
-                logging.info(f"Skipping {symbol}: Invalid close price."); continue
+            if last_close <= 0: logger.info(f"Skipping {symbol}: Invalid close price."); continue
 
             atr_percent = (df[atr_col_name].iloc[-2] / last_close) * 100
             if atr_percent < vol_filters['min_atr_percent']:
-                logging.info(f"Reject {symbol}: Low ATR% ({atr_percent:.2f}% < {vol_filters['min_atr_percent']}%)"); continue
+                logger.info(f"Reject {symbol}: Low ATR% ({atr_percent:.2f}% < {vol_filters['min_atr_percent']}%)"); continue
 
-            # [LOGIC FIX] Always calculate EMA for scanners, but only filter if enabled
+            # [الحل] تطبيق البرمجة الدفاعية للتعامل مع خطأ EMA_200
             ema_col_name = f"EMA_{ema_filters['ema_period']}"
             df.ta.ema(length=ema_filters['ema_period'], append=True)
+            
+            # التحقق أولاً من وجود العمود وأن القيمة ليست فارغة قبل الفلترة
+            if ema_col_name not in df.columns or pd.isna(df[ema_col_name].iloc[-2]):
+                logger.info(f"Skipping {symbol}: EMA_{ema_filters['ema_period']} could not be calculated.")
+                continue # نتخطى العملة بأمان بدلاً من التسبب في خطأ
+
             if ema_filters['enabled']:
-                if pd.isna(df[ema_col_name].iloc[-2]) or last_close < df[ema_col_name].iloc[-2]:
-                    logging.info(f"Reject {symbol}: Below EMA{ema_filters['ema_period']}"); continue
+                if last_close < df[ema_col_name].iloc[-2]:
+                    logger.info(f"Reject {symbol}: Below EMA{ema_filters['ema_period']}"); continue
 
             if settings.get('use_master_trend_filter'):
                 is_htf_bullish, reason = await get_higher_timeframe_trend(exchange, symbol, settings['master_trend_filter_ma_period'])
                 if not is_htf_bullish:
-                    logging.info(f"HTF Trend Filter FAILED for {symbol}: {reason}"); continue
+                    logger.info(f"HTF Trend Filter FAILED for {symbol}: {reason}"); continue
 
             df.ta.adx(append=True)
             adx_col = find_col(df.columns, 'ADX_')
             adx_value = df[adx_col].iloc[-2] if adx_col and pd.notna(df[adx_col].iloc[-2]) else 0
             if settings.get('use_master_trend_filter') and adx_value < settings['master_adx_filter_level']:
-                logging.info(f"ADX Filter FAILED for {symbol}: {adx_value:.2f} < {settings['master_adx_filter_level']}"); continue
+                logger.info(f"ADX Filter FAILED for {symbol}: {adx_value:.2f} < {settings['master_adx_filter_level']}"); continue
 
             confirmed_reasons = [result['reason'] for scanner_name in settings['active_scanners'] if (result := SCANNERS[scanner_name](df.copy(), settings.get(scanner_name, {}), rvol, adx_value)) and result.get("type") == "long"]
 
             if confirmed_reasons and len(confirmed_reasons) >= settings.get("min_signal_strength", 1):
                 reason_str = ' + '.join(confirmed_reasons)
-                logging.info(f"SIGNAL FOUND for {symbol} via {reason_str}")
+                logger.info(f"SIGNAL FOUND for {symbol} via {reason_str}")
                 entry_price = df.iloc[-2]['close']
                 df.ta.atr(length=settings['atr_period'], append=True)
                 current_atr = df.iloc[-2].get(find_col(df.columns, f"ATRr_{settings['atr_period']}"), 0)
@@ -561,9 +522,11 @@ async def worker(queue, results_list, settings, failure_counter):
                 if tp_percent >= min_filters['min_tp_percent'] and sl_percent >= min_filters['min_sl_percent']:
                     results_list.append({"symbol": symbol, "exchange": market_info['exchange'].capitalize(), "entry_price": entry_price, "take_profit": take_profit, "stop_loss": stop_loss, "timestamp": df.index[-2], "reason": reason_str, "strength": len(confirmed_reasons)})
                 else:
-                    logging.info(f"Reject {symbol} Signal: Small TP/SL (TP: {tp_percent:.2f}%, SL: {sl_percent:.2f}%)")
+                    logger.info(f"Reject {symbol} Signal: Small TP/SL (TP: {tp_percent:.2f}%, SL: {sl_percent:.2f}%)")
+        except ccxt.NetworkError as e:
+            logger.warning(f"Network error for {symbol}: {e}") # خطأ شبكة، ليس حرجًا
         except Exception as e:
-            logging.error(f"CRITICAL ERROR in worker for {symbol}: {e}", exc_info=False)
+            logger.error(f"CRITICAL ERROR in worker for {symbol}: {e}", exc_info=True)
             failure_counter[0] += 1
         finally:
             queue.task_done()
@@ -571,24 +534,19 @@ async def worker(queue, results_list, settings, failure_counter):
 async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
     async with scan_lock:
         if bot_data['status_snapshot']['scan_in_progress']:
-            logging.warning("Scan attempted while another was in progress. Skipped."); return
+            logger.warning("Scan attempted while another was in progress. Skipped."); return
         settings = bot_data["settings"]
         if settings.get('fundamental_analysis_enabled', True):
             mood, mood_score, mood_reason = await get_fundamental_market_mood()
-            # [FEATURE] Save the latest mood to settings
-            bot_data['settings']['last_market_mood'] = {
-                "timestamp": datetime.now(EGYPT_TZ).strftime('%Y-%m-%d %H:%M'),
-                "mood": mood,
-                "reason": mood_reason
-            }
+            bot_data['settings']['last_market_mood'] = {"timestamp": datetime.now(EGYPT_TZ).strftime('%Y-%m-%d %H:%M'), "mood": mood, "reason": mood_reason}
             save_settings()
-            logging.info(f"Fundamental Market Mood: {mood} - Reason: {mood_reason}")
+            logger.info(f"Fundamental Market Mood: {mood} - Reason: {mood_reason}")
             if mood in ["NEGATIVE", "DANGEROUS"]:
                 await send_telegram_message(context.bot, {'custom_message': f"⚠️ *إيقاف الفحص: مزاج السوق سلبي/خطر*\n- السبب: {mood_reason}", 'target_chat': TELEGRAM_CHAT_ID}); return
         if settings.get('market_regime_filter_enabled', True):
             is_market_ok, reason = await check_market_regime()
             if not is_market_ok:
-                logging.info(f"Skipping scan: {reason}"); await send_telegram_message(context.bot, {'custom_message': f"⚠️ *إيقاف الفحص: وضع السوق الفني غير مناسب*\n- السبب: {reason}", 'target_chat': TELEGRAM_CHAT_ID}); return
+                logger.info(f"Skipping scan: {reason}"); await send_telegram_message(context.bot, {'custom_message': f"⚠️ *إيقاف الفحص: وضع السوق الفني غير مناسب*\n- السبب: {reason}", 'target_chat': TELEGRAM_CHAT_ID}); return
         status = bot_data['status_snapshot']
         status.update({"scan_in_progress": True, "last_scan_start_time": datetime.now(EGYPT_TZ).strftime('%Y-%m-%d %H:%M:%S'), "signals_found": 0})
         try:
@@ -596,10 +554,10 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
             cursor.execute("SELECT COUNT(*) FROM trades WHERE status = 'نشطة'")
             active_trades_count = cursor.fetchone()[0]; conn.close()
         except Exception as e:
-            logging.error(f"DB Error in perform_scan: {e}"); active_trades_count = settings.get("max_concurrent_trades", 5)
+            logger.error(f"DB Error in perform_scan: {e}"); active_trades_count = settings.get("max_concurrent_trades", 5)
         top_markets = await aggregate_top_movers()
         if not top_markets:
-            logging.info("Scan complete: No markets to scan."); status['scan_in_progress'] = False; return
+            logger.info("Scan complete: No markets to scan."); status['scan_in_progress'] = False; return
         queue = asyncio.Queue(); [await queue.put(market) for market in top_markets]
         signals, failure_counter = [], [0]
         worker_tasks = [asyncio.create_task(worker(queue, signals, settings, failure_counter)) for _ in range(settings['concurrent_workers'])]
@@ -609,7 +567,7 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
         last_signal_time = bot_data['last_signal_time']
         for signal in signals:
             if time.time() - last_signal_time.get(signal['symbol'], 0) <= (SCAN_INTERVAL_SECONDS * 4):
-                logging.info(f"Signal for {signal['symbol']} skipped due to cooldown."); continue
+                logger.info(f"Signal for {signal['symbol']} skipped due to cooldown."); continue
             trade_amount_usdt = settings["virtual_portfolio_balance_usdt"] * (settings["virtual_trade_size_percentage"] / 100)
             signal.update({'quantity': trade_amount_usdt / signal['entry_price'], 'entry_value_usdt': trade_amount_usdt})
             if active_trades_count < settings.get("max_concurrent_trades", 5):
@@ -623,7 +581,7 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
             await asyncio.sleep(0.5)
             last_signal_time[signal['symbol']] = time.time()
         failures = failure_counter[0]
-        logging.info(f"Scan complete. Found: {len(signals)}, Entered: {new_trades}, Opportunities: {opportunities}, Failures: {failures}.")
+        logger.info(f"Scan complete. Found: {len(signals)}, Entered: {new_trades}, Opportunities: {opportunities}, Failures: {failures}.")
         summary_message = f"🔹 *ملخص الفحص* 🔹\n\n▫️ إجمالي الإشارات: *{len(signals)}*\n✅ صفقات جديدة: *{new_trades}*\n💡 فرص إضافية: *{opportunities}*\n⚠️ عملات فشل تحليلها: *{failures}*"
         await send_telegram_message(context.bot, {'custom_message': summary_message, 'target_chat': TELEGRAM_CHAT_ID})
         status['signals_found'] = new_trades + opportunities; status['last_scan_end_time'] = datetime.now(EGYPT_TZ).strftime('%Y-%m-%d %H:%M:%S'); status['scan_in_progress'] = False
@@ -652,14 +610,14 @@ async def send_telegram_message(bot, signal_data, is_new=False, is_opportunity=F
     try:
         await bot.send_message(chat_id=target_chat, text=message, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
     except Exception as e:
-        logging.error(f"Failed to send Telegram message to {target_chat}: {e}")
+        logger.error(f"Failed to send Telegram message to {target_chat}: {e}")
 
 async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
     try:
         conn = sqlite3.connect(DB_FILE, timeout=10); conn.row_factory = sqlite3.Row; cursor = conn.cursor()
         cursor.execute("SELECT * FROM trades WHERE status = 'نشطة'")
         active_trades = [dict(row) for row in cursor.fetchall()]; conn.close()
-    except Exception as e: logging.error(f"DB error in track_open_trades: {e}"); return
+    except Exception as e: logger.error(f"DB error in track_open_trades: {e}"); return
     bot_data['status_snapshot']['active_trades_count'] = len(active_trades)
     if not active_trades: return
 
@@ -691,50 +649,15 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
         if not original_trade: continue
         status = result['status']
         if status in ['ناجحة', 'فاشلة']:
-            # --- MERGE START: Detailed Trade Closure Message Logic ---
             pnl_usdt = (result['exit_price'] - original_trade['entry_price']) * original_trade['quantity']
             portfolio_pnl += pnl_usdt
             closed_at_str = datetime.now(EGYPT_TZ).strftime('%Y-%m-%d %H:%M:%S')
             updates_to_db.append(("UPDATE trades SET status=?, exit_price=?, closed_at=?, exit_value_usdt=?, pnl_usdt=? WHERE id=?", (status, result['exit_price'], closed_at_str, result['exit_price'] * original_trade['quantity'], pnl_usdt, result['id'])))
             pnl_percent = (pnl_usdt / original_trade['entry_value_usdt'] * 100) if original_trade.get('entry_value_usdt', 0) > 0 else 0
-
-            # Calculate duration
-            duration_str = "N/A"
-            try:
-                entry_time = datetime.strptime(original_trade['timestamp'], '%Y-%m-%d %H:%M:%S')
-                close_time = datetime.strptime(closed_at_str, '%Y-%m-%d %H:%M:%S')
-                duration = close_time - entry_time
-                days, remainder = divmod(duration.total_seconds(), 86400)
-                hours, remainder = divmod(remainder, 3600)
-                minutes, _ = divmod(remainder, 60)
-                parts = []
-                if int(days) > 0: parts.append(f"{int(days)} يوم")
-                if int(hours) > 0: parts.append(f"{int(hours)} ساعة")
-                if int(minutes) > 0 or not parts: parts.append(f"{int(minutes)} دقيقة")
-                duration_str = "، ".join(parts)
-            except Exception as e:
-                logging.warning(f"Could not calculate duration for trade #{original_trade['id']}: {e}")
-
-            # Build the detailed message
             icon = "✅" if pnl_usdt >= 0 else "❌"
-            reason_str = "تم تحقيق الهدف" if status == 'ناجحة' else "تم ضرب وقف الخسارة"
-            reason_icon = "🎯" if status == 'ناجحة' else "🛑"
-            def format_price(price): return f"{price:,.8f}" if price < 0.01 else f"{price:,.4f}"
-
-            message = (
-                f"{icon} **تم إغلاق الصفقة #{original_trade['id']}** {icon}\n\n"
-                f"{reason_icon} **السبب:** *{reason_str}*\n"
-                f"━━━━━━━━━━━━━━\n"
-                f"▫️ **العملة:** `{original_trade['symbol']}`\n"
-                f"▫️ **الاستراتيجية:** `{original_trade.get('reason', 'N/A')}`\n"
-                f"▫️ **مدة الصفقة:** `{duration_str}`\n"
-                f"━━━━━━━━━━━━━━\n"
-                f"📈 **سعر الدخول:** `{format_price(original_trade['entry_price'])}`\n"
-                f"📉 **سعر الخروج:** `{format_price(result['exit_price'])}`\n"
-                f"💰 **الربح/الخسارة:** **`${pnl_usdt:+.2f}`** (`{pnl_percent:+.2f}%`)"
-            )
+            reason_str = "تم ضرب الهدف" if status == 'ناجحة' else "تم ضرب الوقف"
+            message = f"{icon} *إغلاق صفقة #{original_trade['id']}* | `{original_trade['symbol']}`\n*السبب:* {reason_str}\n*الربح/الخسارة:* `${pnl_usdt:+.2f}` (`{pnl_percent:+.2f}%)`"
             await send_telegram_message(context.bot, {'custom_message': message, 'target_chat': TELEGRAM_SIGNAL_CHANNEL_ID})
-            # --- MERGE END ---
         elif status == 'update_tsl':
             updates_to_db.append(("UPDATE trades SET stop_loss=?, highest_price=?, trailing_sl_active=? WHERE id=?", (result['new_sl'], result['highest_price'], True, result['id'])))
             await send_telegram_message(context.bot, {**original_trade, **result}, update_type='tsl_activation')
@@ -745,11 +668,11 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
             conn = sqlite3.connect(DB_FILE, timeout=10); cursor = conn.cursor()
             for q, p in updates_to_db: cursor.execute(q, p)
             conn.commit(); conn.close()
-        except Exception as e: logging.error(f"DB update failed in track_open_trades: {e}")
+        except Exception as e: logger.error(f"DB update failed in track_open_trades: {e}")
     if portfolio_pnl != 0.0:
         bot_data['settings']['virtual_portfolio_balance_usdt'] += portfolio_pnl
         save_settings()
-        logging.info(f"Portfolio balance updated by ${portfolio_pnl:.2f}.")
+        logger.info(f"Portfolio balance updated by ${portfolio_pnl:.2f}.")
 
 def get_fear_and_greed_index():
     try:
@@ -758,7 +681,7 @@ def get_fear_and_greed_index():
         if data := response.json().get('data', []):
             return int(data[0]['value'])
     except Exception as e:
-        logging.error(f"Could not fetch Fear and Greed Index: {e}")
+        logger.error(f"Could not fetch Fear and Greed Index: {e}")
     return None
 
 async def check_market_regime():
@@ -771,7 +694,7 @@ async def check_market_regime():
             df['sma50'] = ta.sma(df['close'], length=50)
             is_technically_bullish = df['close'].iloc[-1] > df['sma50'].iloc[-1]
     except Exception as e:
-        logging.error(f"Error checking BTC trend: {e}")
+        logger.error(f"Error checking BTC trend: {e}")
     if settings.get("fear_and_greed_filter_enabled", True):
         if (fng_value := get_fear_and_greed_index()) is not None:
             fng_index = fng_value
@@ -811,7 +734,7 @@ def generate_performance_report_string():
 main_menu_keyboard = [["📊 الإحصائيات", "📈 الصفقات النشطة"], ["📜 تقرير الاستراتيجيات", "⚙️ الإعدادات"], ["👀 ماذا يجري في الخلفية؟", "🔬 فحص يدوي الآن"],["ℹ️ مساعدة"]]
 settings_menu_keyboard = [["🎭 تفعيل/تعطيل الماسحات", "🏁 أنماط جاهزة"], ["🔧 تعديل المعايير", "🔙 القائمة الرئيسية"]]
 
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("أهلاً بك في بوت المحلل الآلي! (v33 - Merged)", reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True))
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("أهلاً بك في بوت المحلل الآلي! (v33 - Fixed)", reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True))
 async def scan_now_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if bot_data['status_snapshot'].get('scan_in_progress', False): await update.message.reply_text("⚠️ فحص آخر قيد التنفيذ."); return
     await update.message.reply_text("⏳ جاري بدء الفحص اليدوي..."); context.job_queue.run_once(perform_scan, 0, name='manual_scan')
@@ -866,7 +789,7 @@ async def show_parameters_menu(update: Update, context: ContextTypes.DEFAULT_TYP
             sent_message = await target_message.reply_text(message_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
             context.user_data['settings_menu_id'] = sent_message.message_id
     except BadRequest as e:
-        if "Message is not modified" not in str(e): logging.error(f"Error editing parameters menu: {e}")
+        if "Message is not modified" not in str(e): logger.error(f"Error editing parameters menu: {e}")
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("*مساعدة البوت*\n`/start` - بدء\n`/scan` - فحص يدوي\n`/report` - تقرير يومي\n`/strategyreport` - تقرير أداء الاستراتيجيات\n`/check <ID>` - متابعة صفقة\n`/debug` - فحص الحالة", parse_mode=ParseMode.MARKDOWN)
@@ -887,12 +810,12 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                        f"- *الفاشلة:* `{failed}` | *الخسارة:* `${abs(pnl.get('فاشلة', 0)):.2f}`\n"
                        f"- *معدل النجاح:* `{win_rate:.2f}%`")
         await update.message.reply_text(stats_msg, parse_mode=ParseMode.MARKDOWN)
-    except Exception as e: logging.error(f"Error in stats_command: {e}", exc_info=True); await update.message.reply_text("خطأ في جلب الإحصائيات.")
+    except Exception as e: logger.error(f"Error in stats_command: {e}", exc_info=True); await update.message.reply_text("خطأ في جلب الإحصائيات.")
 async def strategy_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ جاري إعداد تقرير أداء الاستراتيجيات..."); report_string = generate_performance_report_string()
     await update.message.reply_text(report_string, parse_mode=ParseMode.MARKDOWN)
 async def send_daily_report(context: ContextTypes.DEFAULT_TYPE):
-    today_str = datetime.now(EGYPT_TZ).strftime('%Y-%m-%d'); logging.info(f"Generating daily report for {today_str}...")
+    today_str = datetime.now(EGYPT_TZ).strftime('%Y-%m-%d'); logger.info(f"Generating daily report for {today_str}...")
     try:
         conn = sqlite3.connect(DB_FILE, timeout=10); cursor = conn.cursor()
         cursor.execute("SELECT status, pnl_usdt FROM trades WHERE DATE(closed_at) = ?", (today_str,)); closed_today = cursor.fetchall(); conn.close()
@@ -907,7 +830,7 @@ async def send_daily_report(context: ContextTypes.DEFAULT_TYPE):
                               f"📈 *معدل النجاح:* `{win_rate:.2f}%`\n💰 *الربح/الخسارة:* `${total_pnl:+.2f}`")
         await send_telegram_message(context.bot, {'custom_message': report_message, 'target_chat': TELEGRAM_SIGNAL_CHANNEL_ID})
     except Exception as e:
-        logging.error(f"Failed to generate daily report: {e}", exc_info=True)
+        logger.error(f"Failed to generate daily report: {e}", exc_info=True)
 async def daily_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ جاري إرسال التقرير اليومي...")
     await send_daily_report(context)
@@ -926,7 +849,6 @@ async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     settings = bot_data.get("settings", {})
     parts = ["🩺 *تقرير التشخيص والحالة* 🩺"]
 
-    # [FEATURE] Add market mood to debug report
     mood_info = settings.get("last_market_mood", {})
     parts.append("\n*--- تحليل السوق الأساسي ---*")
     parts.extend([
@@ -987,7 +909,7 @@ async def check_trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE
                        f"💰 *الربح/الخسارة الحالية:*\n`${live_pnl:+.2f} ({live_pnl_percent:+.2f}%)`")
         await target.reply_text(message, parse_mode=ParseMode.MARKDOWN)
     except (ValueError, IndexError): await target.reply_text("رقم صفقة غير صالح. مثال: `/check 17`")
-    except Exception as e: logging.error(f"Error in check_trade_command: {e}", exc_info=True); await target.reply_text("حدث خطأ.")
+    except Exception as e: logger.error(f"Error in check_trade_command: {e}", exc_info=True); await target.reply_text("حدث خطأ.")
 async def show_active_trades_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         conn = sqlite3.connect(DB_FILE, timeout=10); conn.row_factory = sqlite3.Row; cursor = conn.cursor()
@@ -996,7 +918,7 @@ async def show_active_trades_command(update: Update, context: ContextTypes.DEFAU
         if not active_trades: await update.message.reply_text("لا توجد صفقات نشطة حالياً."); return
         keyboard = [[InlineKeyboardButton(f"#{t['id']} | {t['symbol']} | ${t['entry_value_usdt']:.2f} | {t['exchange']}", callback_data=f"check_{t['id']}")] for t in active_trades]
         await update.message.reply_text("اختر صفقة لمتابعتها:", reply_markup=InlineKeyboardMarkup(keyboard))
-    except Exception as e: logging.error(f"Error in show_active_trades: {e}"); await update.message.reply_text("خطأ في جلب الصفقات.")
+    except Exception as e: logger.error(f"Error in show_active_trades: {e}"); await update.message.reply_text("خطأ في جلب الصفقات.")
 
 async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query; await query.answer(); data = query.data
@@ -1068,26 +990,29 @@ async def main_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     handlers = {"📊 الإحصائيات": stats_command, "📈 الصفقات النشطة": show_active_trades_command, "ℹ️ مساعدة": help_command, "⚙️ الإعدادات": show_settings_menu, "👀 ماذا يجري في الخلفية؟": background_status_command, "🔬 فحص يدوي الآن": scan_now_command, "🔧 تعديل المعايير": show_parameters_menu, "🔙 القائمة الرئيسية": start_command, "🔙 قائمة الإعدادات": show_settings_menu, "🎭 تفعيل/تعطيل الماسحات": show_scanners_menu, "🏁 أنماط جاهزة": show_presets_menu, "📜 تقرير الاستراتيجيات": strategy_report_command,}
     if handler := handlers.get(update.message.text): await handler(update, context)
 
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None: logging.error(f"Exception while handling an update: {context.error}", exc_info=context.error)
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None: logger.error(f"Exception while handling an update: {context.error}", exc_info=context.error)
 async def post_init(application: Application):
     if NLTK_AVAILABLE:
-        logging.info("Downloading NLTK data (vader_lexicon)...")
-        nltk.download('vader_lexicon')
-    logging.info("Post-init: Initializing exchanges...")
+        try:
+            nltk.data.find('sentiment/vader_lexicon.zip')
+        except LookupError:
+            logger.info("Downloading NLTK data (vader_lexicon)...")
+            nltk.download('vader_lexicon')
+    logger.info("Post-init: Initializing exchanges...")
     await initialize_exchanges()
-    if not bot_data["exchanges"]: logging.critical("CRITICAL: No exchanges connected. Bot cannot run."); return
-    logging.info("Exchanges initialized. Setting up job queue...")
+    if not bot_data["exchanges"]: logger.critical("CRITICAL: No exchanges connected. Bot cannot run."); return
+    logger.info("Exchanges initialized. Setting up job queue...")
     job_queue = application.job_queue
     job_queue.run_repeating(perform_scan, interval=SCAN_INTERVAL_SECONDS, first=10, name='perform_scan')
     job_queue.run_repeating(track_open_trades, interval=TRACK_INTERVAL_SECONDS, first=20, name='track_open_trades')
     job_queue.run_daily(send_daily_report, time=dt_time(hour=23, minute=55, tzinfo=EGYPT_TZ), name='daily_report')
-    logging.info(f"Jobs scheduled. Daily report at 23:55 {EGYPT_TZ}.")
-    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *المحلل الآلي جاهز للعمل! (v33 - Merged)*", parse_mode=ParseMode.MARKDOWN)
-    logging.info("Post-init finished.")
-async def post_shutdown(application: Application): await asyncio.gather(*[ex.close() for ex in bot_data["exchanges"].values()]); logging.info("All exchange connections closed.")
+    logger.info(f"Jobs scheduled. Daily report at 23:55 {EGYPT_TZ}.")
+    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *المحلل الآلي جاهز للعمل! (v33)*", parse_mode=ParseMode.MARKDOWN)
+    logger.info("Post-init finished.")
+async def post_shutdown(application: Application): await asyncio.gather(*[ex.close() for ex in bot_data["exchanges"].values()]); logger.info("All exchange connections closed.")
 
 def main():
-    print("🚀 Starting Pro Trading Analyzer Bot...")
+    print("🚀 Starting Pro Trading Analyzer Bot v33 (Fixed)...")
     load_settings(); init_database()
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).post_shutdown(post_shutdown).build()
 
