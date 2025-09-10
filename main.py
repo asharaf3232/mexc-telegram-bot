@@ -924,7 +924,7 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
             portfolio_pnl += pnl_usdt
             closed_at_str = datetime.now(EGYPT_TZ).strftime('%Y-%m-%d %H:%M:%S')
             
-            start_dt = datetime.strptime(original_trade['timestamp'], '%Y-%m-%d %H:%M:%S')
+            start_dt = datetime.strptime(original_trade['timestamp'], '%Y-%m-%d %H:%M:%S').replace(tzinfo=EGYPT_TZ)
             end_dt = datetime.now(EGYPT_TZ)
             duration = end_dt - start_dt
             days, remainder = divmod(duration.total_seconds(), 86400)
@@ -1182,7 +1182,7 @@ def generate_performance_report_string():
 
 
 # [تحديث واجهة المستخدم] تحديث القوائم الرئيسية
-main_menu_keyboard = [["Dashboard 🖥️"], ["⚙️ الإعدادات"], ["ℹ️ مساعدة"]]
+main_menu_keyboard = [["Dashboard 🖥️", "🔍 فحص يدوي"], ["⚙️ الإعدادات"], ["ℹ️ مساعدة"]]
 settings_menu_keyboard = [["🏁 أنماط جاهزة", "🎭 تفعيل/تعطيل الماسحات"], ["🔧 تعديل المعايير", "🔙 القائمة الرئيسية"]]
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("أهلاً بك في بوت المحلل الآلي! (v5.1 - تداول حقيقي)", reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True))
@@ -1200,7 +1200,11 @@ async def show_dashboard_command(update: Update, context: ContextTypes.DEFAULT_T
     message_text = f"🖥️ *لوحة التحكم الرئيسية*\n\n**وضع التداول الحالي: {trading_mode}**\n\nاختر التقرير أو البيانات التي تريد عرضها:"
     
     if update.callback_query and update.callback_query.data == "dashboard_refresh":
-         await target_message.edit_text(message_text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
+        try:
+            await target_message.edit_text(message_text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
+        except BadRequest as e:
+            if "Message is not modified" not in str(e):
+                logger.error(f"Error refreshing dashboard: {e}")
     else:
         await target_message.reply_text(message_text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
 
@@ -1429,7 +1433,7 @@ async def check_trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         if trade['status'] != 'نشطة':
             pnl_percent = (trade['pnl_usdt'] / trade['entry_value_usdt'] * 100) if trade.get('entry_value_usdt', 0) > 0 else 0
-            closed_at_dt = datetime.strptime(trade['closed_at'], '%Y-%m-%d %H:%M:%S')
+            closed_at_dt = datetime.strptime(trade['closed_at'], '%Y-%m-%d %H:%M:%S').replace(tzinfo=EGYPT_TZ)
             message = (f"📋 *ملخص الصفقة #{trade_id} ({trade_type})*\n\n"
                        f"*العملة:* `{trade['symbol']}`\n*الحالة:* `{trade['status']}`\n"
                        f"*تاريخ الإغلاق:* `{closed_at_dt.strftime('%Y-%m-%d %I:%M %p')}`\n"
@@ -1478,7 +1482,12 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         elif action == "strategy_report": await strategy_report_command(update, context)
         elif action == "daily_report": await daily_report_command(update, context)
         elif action == "debug": await debug_command(update, context)
-        elif action == "refresh": await show_dashboard_command(update, context)
+        elif action == "refresh":
+            try:
+                await show_dashboard_command(update, context)
+            except BadRequest as e:
+                if "Message is not modified" not in str(e):
+                    logger.error(f"Error on dashboard refresh button: {e}")
         return
 
     elif data.startswith("preset_"):
@@ -1577,6 +1586,7 @@ async def main_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     handlers = {
         "Dashboard 🖥️": show_dashboard_command,
+        "🔍 فحص يدوي": manual_scan_command,
         "ℹ️ مساعدة": help_command, 
         "⚙️ الإعدادات": show_settings_menu, 
         "🔧 تعديل المعايير": show_parameters_menu, 
@@ -1587,6 +1597,15 @@ async def main_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if handler := handlers.get(update.message.text): await handler(update, context)
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None: logger.error(f"Exception while handling an update: {context.error}", exc_info=context.error)
+
+async def manual_scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Triggers a manual scan if one is not already in progress."""
+    if scan_lock.locked():
+        await update.message.reply_text("⏳ يوجد فحص قيد التنفيذ بالفعل. يرجى الانتظار حتى يكتمل.")
+    else:
+        await update.message.reply_text("👍 حسنًا, سأبدأ عملية فحص يدوية للأسواق الآن...")
+        context.job_queue.run_once(lambda ctx: perform_scan(ctx), 0)
+
 async def post_init(application: Application):
     if NLTK_AVAILABLE:
         try: nltk.data.find('sentiment/vader_lexicon.zip')
@@ -1613,6 +1632,7 @@ def main():
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).post_shutdown(post_shutdown).build()
 
     application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("scan", manual_scan_command))
     application.add_handler(CommandHandler("check", check_trade_command))
     application.add_handler(CallbackQueryHandler(button_callback_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, main_text_handler))
