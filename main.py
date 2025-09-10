@@ -659,10 +659,10 @@ async def send_telegram_message(bot, signal_data, is_new=False, is_opportunity=F
         reasons_en = signal_data['reason'].split(' + ')
         reasons_ar = ' + '.join([STRATEGY_NAMES_AR.get(r, r) for r in reasons_en])
 
-        message = (f"* सिग्नल अलर्ट * сигнал тревоги * Signal Alert *\n"
-                   f"- - - - - - - - - - - - - - - - - -\n"
+        message = (f"**Signal Alert | تنبيه إشارة**\n"
+                   f"------------------------------------\n"
                    f"{title}\n"
-                   f"- - - - - - - - - - - - - - - - - -\n"
+                   f"------------------------------------\n"
                    f"🔹 **المنصة:** {signal_data['exchange']}\n"
                    f"⭐ **قوة الإشارة:** {strength_stars}\n"
                    f"🔍 **الاستراتيجية:** {reasons_ar}\n\n"
@@ -1620,4 +1620,3 @@ if __name__ == '__main__':
         main()
     except Exception as e:
         logging.critical(f"Bot stopped due to a critical unhandled error: {e}", exc_info=True)
-
