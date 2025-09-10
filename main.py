@@ -864,7 +864,10 @@ async def fetch_and_cache_data(symbol, timeframe, days):
         return pd.read_csv(cache_file, index_col='timestamp', parse_dates=True)
 
     logger.info(f"Fetching new historical data for {symbol} for the last {days} days...")
-    exchange = ccxt_async.binance()
+    # [FIX] Correctly initialize the async exchange using the alias `ccxt_async`
+    # The error log indicated an incorrect call was being made, causing an AttributeError.
+    # This ensures the async exchange for backtesting is created properly.
+    exchange = ccxt_async.binance({'enableRateLimit': True})
     since = exchange.milliseconds() - timedelta(days=days).total_seconds() * 1000
     limit = 1000 
     all_ohlcv = []
