@@ -63,9 +63,9 @@ SCAN_INTERVAL_SECONDS = 900
 TRACK_INTERVAL_SECONDS = 120
 
 APP_ROOT = '.'
-# [تحديث] تم تحديث الإصدار إلى v6
-DB_FILE = os.path.join(APP_ROOT, 'trading_bot_v6.db')
-SETTINGS_FILE = os.path.join(APP_ROOT, 'settings_v6.json')
+# [تحديث] تم تحديث الإصدار إلى v7
+DB_FILE = os.path.join(APP_ROOT, 'trading_bot_v7.db')
+SETTINGS_FILE = os.path.join(APP_ROOT, 'settings_v7.json')
 # [جديد] مجلد لتخزين البيانات التاريخية مؤقتاً
 DATA_CACHE_DIR = Path(APP_ROOT) / 'data_cache'
 DATA_CACHE_DIR.mkdir(exist_ok=True)
@@ -74,7 +74,7 @@ DATA_CACHE_DIR.mkdir(exist_ok=True)
 EGYPT_TZ = ZoneInfo("Africa/Cairo")
 
 # --- إعداد مسجل الأحداث (Logger) --- #
-LOG_FILE = os.path.join(APP_ROOT, 'bot_v6.log')
+LOG_FILE = os.path.join(APP_ROOT, 'bot_v7.log')
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO, handlers=[logging.FileHandler(LOG_FILE, 'a'), logging.StreamHandler()])
 logging.getLogger('httpx').setLevel(logging.WARNING)
 logging.getLogger('apscheduler').setLevel(logging.WARNING)
@@ -855,7 +855,7 @@ async def analyze_performance_and_suggest(context: ContextTypes.DEFAULT_TYPE):
         save_settings()
 
 
-# --- [جديد] قسم مختبر الاستراتيجيات (Backtesting & Optimization) ---
+# --- [جديد وقيد الإصلاح] قسم مختبر الاستراتيجيات (Backtesting & Optimization) ---
 
 async def fetch_and_cache_data(symbol, timeframe, days):
     """Fetches historical data from Binance and caches it to a file."""
@@ -866,29 +866,24 @@ async def fetch_and_cache_data(symbol, timeframe, days):
         return pd.read_csv(cache_file, index_col='timestamp', parse_dates=True)
 
     logger.info(f"Fetching new historical data for {symbol} for the last {days} days...")
-    exchange = ccxt.binance() # Use a synchronous instance for fetching historical data
+    # [إصلاح] استخدام النسخة الغير متزامنة من المكتبة بشكل صحيح
+    exchange = ccxt.binance()
+    
     since = exchange.milliseconds() - timedelta(days=days).total_seconds() * 1000
     limit = 1000 
     all_ohlcv = []
     
-    # Use async for network calls inside the sync function context
-    async def fetch_ohlcv_async(symbol, timeframe, since, limit):
-        async_exchange = ccxt.async_support.binance()
-        try:
-            return await async_exchange.fetch_ohlcv(symbol, timeframe, since, limit)
-        finally:
-            await async_exchange.close()
-
-    while True:
-        try:
-            ohlcv = await fetch_ohlcv_async(symbol, timeframe, since, limit)
+    # [إصلاح] استخدام نسخة متزامنة لجلب البيانات التاريخية بشكل أبسط
+    try:
+        while True:
+            ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since, limit)
             if not ohlcv:
                 break
             all_ohlcv.extend(ohlcv)
             since = ohlcv[-1][0] + 1
-        except Exception as e:
-            logger.error(f"Error fetching historical data for {symbol}: {e}")
-            return None
+    except Exception as e:
+        logger.error(f"Error fetching historical data for {symbol}: {e}")
+        return None
     
     if not all_ohlcv: return None
 
@@ -908,7 +903,10 @@ async def backtest_runner_job(context: ContextTypes.DEFAULT_TYPE):
     days = job_data['days']
 
     await context.bot.send_message(chat_id, f"🔍 جاري تحميل البيانات التاريخية لـ `{symbol}`...", parse_mode=ParseMode.MARKDOWN)
-    df = await fetch_and_cache_data(symbol, TIMEFRAME, days)
+    # [إصلاح] جدولة المهمة المتزامنة في الحلقة غير المتزامنة
+    loop = asyncio.get_running_loop()
+    df = await loop.run_in_executor(None, lambda: asyncio.run(fetch_and_cache_data(symbol, TIMEFRAME, days)))
+
     if df is None or df.empty:
         await context.bot.send_message(chat_id, f"❌ فشل تحميل البيانات التاريخية لـ `{symbol}`. الرجاء المحاولة مرة أخرى.", parse_mode=ParseMode.MARKDOWN)
         return
@@ -930,7 +928,6 @@ async def backtest_runner_job(context: ContextTypes.DEFAULT_TYPE):
     entry_price = 0
     portfolio_history = [balance]
 
-    # Pre-calculate all necessary indicators
     df.ta.bbands(length=20, append=True)
     df.ta.kc(length=20, append=True)
     df.ta.supertrend(length=10, multiplier=3, append=True)
@@ -940,7 +937,7 @@ async def backtest_runner_job(context: ContextTypes.DEFAULT_TYPE):
     df.ta.macd(append=True)
     df.ta.vwap(append=True)
 
-    for i in range(200, len(df)): # Start after indicators have warmed up
+    for i in range(200, len(df)):
         row = df.iloc[i]
         
         if not in_trade:
@@ -1007,20 +1004,15 @@ async def backtest_runner_job(context: ContextTypes.DEFAULT_TYPE):
     
     await context.bot.send_message(chat_id, report, parse_mode=ParseMode.MARKDOWN)
 
+
 async def optimization_runner_job(context: ContextTypes.DEFAULT_TYPE):
-    """Job function to run optimization in the background."""
-    await asyncio.sleep(10) # Simulate a long process
+    await asyncio.sleep(10)
     await context.bot.send_message(context.job.data['chat_id'], "🤖 **اكتملت عملية التحسين!**\n\n(هذه ميزة تجريبية، سيتم عرض النتائج هنا في التحديثات المستقبلية.)")
 
-# --- [إصلاح] تعريف الوظيفة المفقودة ---
 async def lab_conversation_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles user text input during the lab setup conversation."""
     user_data = context.user_data
-    if 'lab_state' not in user_data:
-        return
-
-    state = user_data['lab_state']
     text = update.message.text.upper()
+    state = user_data.get('lab_state')
 
     if state == 'awaiting_symbol':
         if '/' not in text or len(text.split('/')[0]) < 2:
@@ -1032,11 +1024,6 @@ async def lab_conversation_handler(update: Update, context: ContextTypes.DEFAULT
         
         keyboard = [[InlineKeyboardButton(STRATEGY_NAMES_AR.get(name, name), callback_data=f"lab_strategy_{name}")] for name in SCANNERS.keys()]
         await update.message.reply_text("اختر الاستراتيجية للاختبار:", reply_markup=InlineKeyboardMarkup(keyboard))
-    
-    elif text.startswith('/'):
-        for key in ['lab_mode', 'lab_state', 'lab_symbol', 'lab_strategy']:
-            user_data.pop(key, None)
-        logger.info("Exited strategy lab conversation due to new command.")
 
 
 # --- Reports and Telegram Commands (Modified) ---
@@ -1070,7 +1057,7 @@ def generate_performance_report_string():
 main_menu_keyboard = [["Dashboard 🖥️"], ["⚙️ الإعدادات"], ["ℹ️ مساعدة"]]
 settings_menu_keyboard = [["🏁 أنماط جاهزة", "🎭 تفعيل/تعطيل الماسحات"], ["🔧 تعديل المعايير", "🔙 القائمة الرئيسية"]]
 
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("أهلاً بك في بوت المحلل الآلي! (v6 - مختبر الاستراتيجيات)", reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True))
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("أهلاً بك في بوت المحلل الآلي! (v7 - إصلاح شامل)", reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True))
 
 async def show_dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target_message = update.message or update.callback_query.message
@@ -1460,11 +1447,38 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             await query.edit_message_text("👍 **تم تجاهل الاقتراح.**\n\nسيستمر البوت بالعمل على الإعدادات الحالية.", parse_mode=ParseMode.MARKDOWN)
 
 
-async def main_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if 'lab_state' in context.user_data:
-        return # Handled by lab_conversation_handler, do nothing here
+# [إصلاح] معالج رسائل موحد وذكي
+async def universal_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_data = context.user_data
+    text = update.message.text
+    
+    # الأولوية ١: التعامل مع أزرار القائمة الرئيسية
+    menu_handlers = {
+        "Dashboard 🖥️": show_dashboard_command,
+        "ℹ️ مساعدة": help_command, 
+        "⚙️ الإعدادات": show_settings_menu, 
+        "🔧 تعديل المعايير": show_parameters_menu, 
+        "🔙 القائمة الرئيسية": start_command, 
+        "🎭 تفعيل/تعطيل الماسحات": show_scanners_menu, 
+        "🏁 أنماط جاهزة": show_presets_menu, 
+    }
+    if text in menu_handlers:
+        # الخروج من أي حوار نشط عند الضغط على زر قائمة
+        for key in list(user_data.keys()):
+            if key.startswith('lab_'):
+                user_data.pop(key)
+        
+        handler = menu_handlers[text]
+        await handler(update, context)
+        return
 
-    if param := context.user_data.pop('awaiting_input_for_param', None):
+    # الأولوية ٢: التعامل مع الحوارات النشطة (مثل مختبر الاستراتيجيات)
+    if 'lab_state' in user_data:
+        await lab_conversation_handler(update, context)
+        return
+
+    # الأولوية ٣: التعامل مع إدخال قيم الإعدادات
+    if param := user_data.pop('awaiting_input_for_param', None):
         value_str = update.message.text
         settings_menu_id = context.user_data.pop('settings_menu_id', None)
         chat_id = update.message.chat_id
@@ -1488,17 +1502,6 @@ async def main_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context.job_queue.run_once(lambda _: show_parameters_menu(update, context), 3)
         return
 
-    handlers = {
-        "Dashboard 🖥️": show_dashboard_command,
-        "ℹ️ مساعدة": help_command, 
-        "⚙️ الإعدادات": show_settings_menu, 
-        "🔧 تعديل المعايير": show_parameters_menu, 
-        "🔙 القائمة الرئيسية": start_command, 
-        "🎭 تفعيل/تعطيل الماسحات": show_scanners_menu, 
-        "🏁 أنماط جاهزة": show_presets_menu, 
-    }
-    if handler := handlers.get(update.message.text): await handler(update, context)
-
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None: logger.error(f"Exception while handling an update: {context.error}", exc_info=context.error)
 async def post_init(application: Application):
     if NLTK_AVAILABLE:
@@ -1513,12 +1516,12 @@ async def post_init(application: Application):
     job_queue.run_repeating(track_open_trades, interval=TRACK_INTERVAL_SECONDS, first=20, name='track_open_trades')
     job_queue.run_daily(send_daily_report, time=dt_time(hour=23, minute=55, tzinfo=EGYPT_TZ), name='daily_report')
     logger.info(f"Jobs scheduled. Daily report at 23:55 {EGYPT_TZ}.")
-    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *المحلل الآلي جاهز للعمل! (v6 - مختبر الاستراتيجيات)*", parse_mode=ParseMode.MARKDOWN)
+    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *المحلل الآلي جاهز للعمل! (v7 - إصلاح شامل)*", parse_mode=ParseMode.MARKDOWN)
     logger.info("Post-init finished.")
 async def post_shutdown(application: Application): await asyncio.gather(*[ex.close() for ex in bot_data["exchanges"].values()]); logger.info("All exchange connections closed.")
 
 def main():
-    print("🚀 Starting Pro Trading Analyzer Bot v6 (Strategy Lab)...")
+    print("🚀 Starting Pro Trading Analyzer Bot v7 (Robust & Fixed)...")
     load_settings(); init_database()
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).post_shutdown(post_shutdown).build()
 
@@ -1526,9 +1529,8 @@ def main():
     application.add_handler(CommandHandler("check", check_trade_command))
     application.add_handler(CallbackQueryHandler(button_callback_handler))
     
-    # [تعديل] إضافة معالج المحادثة للمختبر
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, lab_conversation_handler), group=1)
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, main_text_handler), group=2)
+    # معالج رسائل واحد وموحد
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, universal_text_handler))
     
     application.add_error_handler(error_handler)
 
