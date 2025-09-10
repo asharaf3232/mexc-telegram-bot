@@ -1,4 +1,37 @@
-# -*- coding: utf-8 -*-
+    await context.bot.send_message(context.job.data['chat_id'], "🤖 **اكتملت عملية التحسين!**\n\n(هذه ميزة تجريبية، سيتم عرض النتائج هنا في التحديثات المستقبلية.)")
+
+# --- Interactive Conversation Flow for Strategy Lab ---
+async def lab_conversation_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles user text input during the lab setup conversation."""
+    user_data = context.user_data
+    if 'lab_state' not in user_data:
+        return # Not in a lab conversation, do nothing.
+
+    state = user_data['lab_state']
+    text = update.message.text.upper()
+
+    if state == 'awaiting_symbol':
+        # Basic validation
+        if '/' not in text or len(text.split('/')[0]) < 2:
+            await update.message.reply_text("❌ رمز غير صالح. الرجاء إرسال الرمز بالتنسيق الصحيح (مثال: `BTC/USDT`).", parse_mode=ParseMode.MARKDOWN)
+            return
+        
+        user_data['lab_symbol'] = text
+        user_data['lab_state'] = 'awaiting_strategy'
+        
+        keyboard = [[InlineKeyboardButton(STRATEGY_NAMES_AR.get(name, name), callback_data=f"lab_strategy_{name}")] for name in SCANNERS.keys()]
+        await update.message.reply_text("اختر الاستراتيجية للاختبار:", reply_markup=InlineKeyboardMarkup(keyboard))
+    
+    # If user types a command, let's exit the conversation gracefully
+    elif text.startswith('/'):
+        for key in ['lab_mode', 'lab_state', 'lab_symbol', 'lab_strategy']:
+            user_data.pop(key, None)
+        # We don't handle the command here, we just exit the state
+        # The command will be handled by its own handler.
+        logger.info("Exited strategy lab conversation due to new command.")
+
+# --- Reports and Telegram Commands (Modified) ---
+
 
 # --- المكتبات المطلوبة --- #
 import ccxt.async_support as ccxt
@@ -1364,3 +1397,4 @@ if __name__ == '__main__':
         main()
     except Exception as e:
         logging.critical(f"Bot stopped due to a critical unhandled error: {e}", exc_info=True)
+
