@@ -541,6 +541,11 @@ async def worker(queue, results_list, settings, failure_counter):
                     results_list.append({"symbol": symbol, "exchange": market_info['exchange'].capitalize(), "entry_price": entry_price, "take_profit": take_profit, "stop_loss": stop_loss, "timestamp": df.index[-2], "reason": reason_str, "strength": len(confirmed_reasons)})
                 else:
                     logger.debug(f"Reject {symbol} Signal: Small TP/SL (TP: {tp_percent:.2f}%, SL: {sl_percent:.2f}%)")
+        
+        # [FIX] Handle RateLimitExceeded error specifically to avoid spamming the exchange.
+        except ccxt.RateLimitExceeded as e:
+            logger.warning(f"Rate limit exceeded for {symbol} on {market_info['exchange']}. Pausing...: {e}")
+            await asyncio.sleep(10) # Pause for 10 seconds before continuing
         except ccxt.NetworkError as e:
             logger.warning(f"Network error for {symbol}: {e}")
         except Exception as e:
