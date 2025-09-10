@@ -63,9 +63,9 @@ SCAN_INTERVAL_SECONDS = 900
 TRACK_INTERVAL_SECONDS = 120
 
 APP_ROOT = '.'
-# [تحديث] تم تحديث الإصدار إلى v7
-DB_FILE = os.path.join(APP_ROOT, 'trading_bot_v7.db')
-SETTINGS_FILE = os.path.join(APP_ROOT, 'settings_v7.json')
+# [تحديث] تم تحديث الإصدار إلى v8
+DB_FILE = os.path.join(APP_ROOT, 'trading_bot_v8.db')
+SETTINGS_FILE = os.path.join(APP_ROOT, 'settings_v8.json')
 # [جديد] مجلد لتخزين البيانات التاريخية مؤقتاً
 DATA_CACHE_DIR = Path(APP_ROOT) / 'data_cache'
 DATA_CACHE_DIR.mkdir(exist_ok=True)
@@ -74,7 +74,7 @@ DATA_CACHE_DIR.mkdir(exist_ok=True)
 EGYPT_TZ = ZoneInfo("Africa/Cairo")
 
 # --- إعداد مسجل الأحداث (Logger) --- #
-LOG_FILE = os.path.join(APP_ROOT, 'bot_v7.log')
+LOG_FILE = os.path.join(APP_ROOT, 'bot_v8.log')
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO, handlers=[logging.FileHandler(LOG_FILE, 'a'), logging.StreamHandler()])
 logging.getLogger('httpx').setLevel(logging.WARNING)
 logging.getLogger('apscheduler').setLevel(logging.WARNING)
@@ -866,17 +866,14 @@ async def fetch_and_cache_data(symbol, timeframe, days):
         return pd.read_csv(cache_file, index_col='timestamp', parse_dates=True)
 
     logger.info(f"Fetching new historical data for {symbol} for the last {days} days...")
-    # [إصلاح] استخدام النسخة الغير متزامنة من المكتبة بشكل صحيح
-    exchange = ccxt.binance()
-    
+    exchange = ccxt.async_support.binance()
     since = exchange.milliseconds() - timedelta(days=days).total_seconds() * 1000
     limit = 1000 
     all_ohlcv = []
     
-    # [إصلاح] استخدام نسخة متزامنة لجلب البيانات التاريخية بشكل أبسط
     try:
         while True:
-            ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since, limit)
+            ohlcv = await exchange.fetch_ohlcv(symbol, timeframe, since, limit)
             if not ohlcv:
                 break
             all_ohlcv.extend(ohlcv)
@@ -884,7 +881,9 @@ async def fetch_and_cache_data(symbol, timeframe, days):
     except Exception as e:
         logger.error(f"Error fetching historical data for {symbol}: {e}")
         return None
-    
+    finally:
+        await exchange.close()
+
     if not all_ohlcv: return None
 
     df = pd.DataFrame(all_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
@@ -903,9 +902,8 @@ async def backtest_runner_job(context: ContextTypes.DEFAULT_TYPE):
     days = job_data['days']
 
     await context.bot.send_message(chat_id, f"🔍 جاري تحميل البيانات التاريخية لـ `{symbol}`...", parse_mode=ParseMode.MARKDOWN)
-    # [إصلاح] جدولة المهمة المتزامنة في الحلقة غير المتزامنة
-    loop = asyncio.get_running_loop()
-    df = await loop.run_in_executor(None, lambda: asyncio.run(fetch_and_cache_data(symbol, TIMEFRAME, days)))
+    
+    df = await fetch_and_cache_data(symbol, TIMEFRAME, days)
 
     if df is None or df.empty:
         await context.bot.send_message(chat_id, f"❌ فشل تحميل البيانات التاريخية لـ `{symbol}`. الرجاء المحاولة مرة أخرى.", parse_mode=ParseMode.MARKDOWN)
@@ -1057,7 +1055,7 @@ def generate_performance_report_string():
 main_menu_keyboard = [["Dashboard 🖥️"], ["⚙️ الإعدادات"], ["ℹ️ مساعدة"]]
 settings_menu_keyboard = [["🏁 أنماط جاهزة", "🎭 تفعيل/تعطيل الماسحات"], ["🔧 تعديل المعايير", "🔙 القائمة الرئيسية"]]
 
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("أهلاً بك في بوت المحلل الآلي! (v7 - إصلاح شامل)", reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True))
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("أهلاً بك في بوت المحلل الآلي! (v8 - إصدار مستقر)", reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True))
 
 async def show_dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target_message = update.message or update.callback_query.message
@@ -1516,12 +1514,12 @@ async def post_init(application: Application):
     job_queue.run_repeating(track_open_trades, interval=TRACK_INTERVAL_SECONDS, first=20, name='track_open_trades')
     job_queue.run_daily(send_daily_report, time=dt_time(hour=23, minute=55, tzinfo=EGYPT_TZ), name='daily_report')
     logger.info(f"Jobs scheduled. Daily report at 23:55 {EGYPT_TZ}.")
-    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *المحلل الآلي جاهز للعمل! (v7 - إصلاح شامل)*", parse_mode=ParseMode.MARKDOWN)
+    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *المحلل الآلي جاهز للعمل! (v8 - إصدار مستقر)*", parse_mode=ParseMode.MARKDOWN)
     logger.info("Post-init finished.")
 async def post_shutdown(application: Application): await asyncio.gather(*[ex.close() for ex in bot_data["exchanges"].values()]); logger.info("All exchange connections closed.")
 
 def main():
-    print("🚀 Starting Pro Trading Analyzer Bot v7 (Robust & Fixed)...")
+    print("🚀 Starting Pro Trading Analyzer Bot v8 (Stable & Fixed)...")
     load_settings(); init_database()
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).post_shutdown(post_shutdown).build()
 
