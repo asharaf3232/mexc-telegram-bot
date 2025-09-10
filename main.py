@@ -864,11 +864,12 @@ async def fetch_and_cache_data(symbol, timeframe, days):
         return pd.read_csv(cache_file, index_col='timestamp', parse_dates=True)
 
     logger.info(f"Fetching new historical data for {symbol} for the last {days} days...")
-    # [FIX] Correctly initialize the async exchange using the alias `ccxt_async`
-    # The error log indicated an incorrect call was being made, causing an AttributeError.
-    # This ensures the async exchange for backtesting is created properly.
     exchange = ccxt_async.binance({'enableRateLimit': True})
-    since = exchange.milliseconds() - timedelta(days=days).total_seconds() * 1000
+    
+    # [FIX] The Binance API requires the 'since' timestamp to be an integer.
+    # The previous calculation could result in a float, causing an API error.
+    # Casting to int() ensures the timestamp is in the correct format.
+    since = int(exchange.milliseconds() - timedelta(days=days).total_seconds() * 1000)
     limit = 1000 
     all_ohlcv = []
     
@@ -1541,3 +1542,4 @@ if __name__ == '__main__':
         main()
     except Exception as e:
         logging.critical(f"Bot stopped due to a critical unhandled error: {e}", exc_info=True)
+
