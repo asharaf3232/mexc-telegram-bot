@@ -13,7 +13,7 @@ import time
 import sqlite3
 from datetime import datetime, time as dt_time, timedelta, timezone
 from zoneinfo import ZoneInfo
-from collections import deque
+from collections import deque, Counter, defaultdict
 
 # [UPGRADE] المكتبات الجديدة لتحليل الأخبار
 import feedparser
@@ -61,15 +61,15 @@ SCAN_INTERVAL_SECONDS = 900
 TRACK_INTERVAL_SECONDS = 120
 
 APP_ROOT = '.'
-# [تحديث] تم تحديث الإصدار إلى v4 لتجنب التعارض مع الملفات القديمة
-DB_FILE = os.path.join(APP_ROOT, 'trading_bot_v4.db')
-SETTINGS_FILE = os.path.join(APP_ROOT, 'settings_v4.json')
+# [تحديث] تم تحديث الإصدار إلى v5
+DB_FILE = os.path.join(APP_ROOT, 'trading_bot_v5.db')
+SETTINGS_FILE = os.path.join(APP_ROOT, 'settings_v5.json')
 
 
 EGYPT_TZ = ZoneInfo("Africa/Cairo")
 
 # --- إعداد مسجل الأحداث (Logger) --- #
-LOG_FILE = os.path.join(APP_ROOT, 'bot_v4.log')
+LOG_FILE = os.path.join(APP_ROOT, 'bot_v5.log')
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO, handlers=[logging.FileHandler(LOG_FILE, 'a'), logging.StreamHandler()])
 logging.getLogger('httpx').setLevel(logging.WARNING)
 logging.getLogger('apscheduler').setLevel(logging.WARNING)
@@ -161,7 +161,7 @@ bot_data = {
         "scan_in_progress": False, "btc_market_mood": "غير محدد"
     },
     # [ميزة جديدة] سجل الفحص للاقتراحات الذكية
-    "scan_history": deque(maxlen=10) # يخزن بيانات آخر 10 فحوصات
+    "scan_history": deque(maxlen=10)
 }
 scan_lock = asyncio.Lock()
 
@@ -184,9 +184,9 @@ DEFAULT_SETTINGS = {
     "ema_trend_filter": {"enabled": True, "ema_period": 200},
     "min_tp_sl_filter": {"min_tp_percent": 1.0, "min_sl_percent": 0.5},
     "min_signal_strength": 1,
-    "active_preset_name": "PRO", # يبدأ بنمط افتراضي
+    "active_preset_name": "PRO",
     "last_market_mood": {"timestamp": "N/A", "mood": "UNKNOWN", "reason": "No scan performed yet."},
-    "last_suggestion_time": 0 # [ميزة جديدة] لمنع تكرار الاقتراحات
+    "last_suggestion_time": 0
 }
 
 
@@ -591,7 +591,8 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
         logger.info(f"Scan complete. Found: {len(signals)}, Entered: {new_trades}, Opportunities: {opportunities}, Failures: {failures}.")
         
         # [تحديث واجهة المستخدم] تحديث رسالة ملخص الفحص
-        scan_duration = (datetime.strptime(datetime.now(EGYPT_TZ).strftime('%Y-%m-%d %H:%M:%S'), '%Y-%m-%d %H:%M:%S') - datetime.strptime(status['last_scan_start_time'], '%Y-%m-%d %H:%M:%S')).total_seconds()
+        scan_duration_str = status['last_scan_start_time']
+        scan_duration = (datetime.strptime(datetime.now(EGYPT_TZ).strftime('%Y-%m-%d %H:%M:%S'), '%Y-%m-%d %H:%M:%S') - datetime.strptime(scan_duration_str, '%Y-%m-%d %H:%M:%S')).total_seconds() if scan_duration_str != 'N/A' else 0
         summary_message = (f"**🔬 ملخص الفحص الأخير**\n\n"
                            f"- **الحالة:** اكتمل بنجاح\n"
                            f"- **وضع السوق (BTC):** {status['btc_market_mood']}\n"
@@ -630,7 +631,6 @@ async def send_telegram_message(bot, signal_data, is_new=False, is_opportunity=F
         tp_percent, sl_percent = ((tp - entry) / entry * 100), ((entry - sl) / entry * 100)
         id_line = f"\n*للمتابعة اضغط: /check {signal_data['trade_id']}*" if is_new else ""
         
-        # ترجمة الأسباب
         reasons_en = signal_data['reason'].split(' + ')
         reasons_ar = ' + '.join([STRATEGY_NAMES_AR.get(r, r) for r in reasons_en])
 
@@ -672,10 +672,15 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
         try:
             ticker = await exchange.fetch_ticker(trade['symbol']); current_price = ticker.get('last') or ticker.get('close')
             if not current_price: return None
-            if current_price >= trade['take_profit']: return {'id': trade['id'], 'status': 'ناجحة', 'exit_price': current_price}
-            if current_price <= trade['stop_loss']: return {'id': trade['id'], 'status': 'فاشلة', 'exit_price': current_price}
-            settings = bot_data["settings"]
+            
+            # تحديث أعلى سعر تم الوصول إليه
             highest_price = max(trade.get('highest_price', current_price), current_price)
+            
+            if current_price >= trade['take_profit']: return {'id': trade['id'], 'status': 'ناجحة', 'exit_price': current_price, 'highest_price': highest_price}
+            if current_price <= trade['stop_loss']: return {'id': trade['id'], 'status': 'فاشلة', 'exit_price': current_price, 'highest_price': highest_price}
+            
+            settings = bot_data["settings"]
+            
             if settings.get('trailing_sl_enabled', False):
                 if not trade.get('trailing_sl_active') and current_price >= trade['entry_price'] * (1 + settings['trailing_sl_activate_percent'] / 100):
                     new_sl = trade['entry_price']
@@ -683,6 +688,7 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
                 elif trade.get('trailing_sl_active'):
                     new_sl = highest_price * (1 - settings['trailing_sl_percent'] / 100)
                     if new_sl > trade['stop_loss']: return {'id': trade['id'], 'status': 'update_sl', 'new_sl': new_sl, 'highest_price': highest_price}
+            
             if highest_price > trade.get('highest_price', 0): return {'id': trade['id'], 'status': 'update_peak', 'highest_price': highest_price}
         except Exception: pass
         return None
@@ -698,9 +704,8 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
             portfolio_pnl += pnl_usdt
             closed_at_str = datetime.now(EGYPT_TZ).strftime('%Y-%m-%d %H:%M:%S')
             
-            # [تحديث واجهة المستخدم] حساب مدة الصفقة
             start_dt = datetime.strptime(original_trade['timestamp'], '%Y-%m-%d %H:%M:%S')
-            end_dt = datetime.strptime(closed_at_str, '%Y-%m-%d %H:%M:%S')
+            end_dt = datetime.now(EGYPT_TZ)
             duration = end_dt - start_dt
             days, remainder = divmod(duration.total_seconds(), 86400)
             hours, remainder = divmod(remainder, 3600)
@@ -708,9 +713,10 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
             duration_str = f"{int(days)}d {int(hours)}h {int(minutes)}m" if days > 0 else f"{int(hours)}h {int(minutes)}m"
 
             updates_to_db.append(("UPDATE trades SET status=?, exit_price=?, closed_at=?, exit_value_usdt=?, pnl_usdt=?, highest_price=? WHERE id=?", 
-                                  (status, result['exit_price'], closed_at_str, result['exit_price'] * original_trade['quantity'], pnl_usdt, original_trade.get('highest_price', original_trade['entry_price']), result['id'])))
+                                  (status, result['exit_price'], closed_at_str, result['exit_price'] * original_trade['quantity'], pnl_usdt, result['highest_price'], result['id'])))
             
-            # [تحديث واجهة المستخدم] رسائل إغلاق الصفقات الجديدة
+            highest_price_val = result.get('highest_price', original_trade['entry_price'])
+            
             if status == 'ناجحة':
                 message = (f"**📦 إغلاق صفقة | #{original_trade['id']} {original_trade['symbol']}**\n\n"
                            f"**الحالة: ✅ ناجحة (تهانينا! تم تحقيق الهدف بنجاح)**\n"
@@ -719,9 +725,9 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
                            f"- - - - - - - - - - - - - - - - - -\n\n"
                            f"- **سعر الدخول:** `{original_trade['entry_price']}`\n"
                            f"- **سعر الإغلاق:** `{result['exit_price']}`\n"
-                           f"- **أعلى قمة وصلت لها:** `{original_trade.get('highest_price', result['exit_price'])}` (`{((original_trade.get('highest_price', result['exit_price']) - original_trade['entry_price']) / original_trade['entry_price'] * 100):+.2f}%` من الدخول)\n"
+                           f"- **أعلى قمة وصلت لها:** `{highest_price_val}` (`{((highest_price_val - original_trade['entry_price']) / original_trade['entry_price'] * 100):+.2f}%` من الدخول)\n"
                            f"- **مدة الاحتفاظ بالصفقة:** {duration_str}")
-            else: # فاشلة
+            else:
                 message = (f"**📦 إغلاق صفقة | #{original_trade['id']} {original_trade['symbol']}**\n\n"
                            f"**الحالة: ❌ فاشلة (تم ضرب الوقف)**\n"
                            f"*\"لا بأس، كل صفقة هي درس جديد. الخسارة جزء من رحلة النجاح.\"*\n"
@@ -730,7 +736,7 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
                            f"- - - - - - - - - - - - - - - - - -\n\n"
                            f"- **سعر الدخول:** `{original_trade['entry_price']}`\n"
                            f"- **سعر الإغلاق:** `{result['exit_price']}`\n"
-                           f"- **أعلى قمة وصلت لها:** `{original_trade.get('highest_price', original_trade['entry_price'])}` (`{((original_trade.get('highest_price', original_trade['entry_price']) - original_trade['entry_price']) / original_trade['entry_price'] * 100):+.2f}%` من الدخول)\n"
+                           f"- **أعلى قمة وصلت لها:** `{highest_price_val}` (`{((highest_price_val - original_trade['entry_price']) / original_trade['entry_price'] * 100):+.2f}%` من الدخول)\n"
                            f"- **مدة الاحتفاظ بالصفقة:** {duration_str}")
 
             await send_telegram_message(context.bot, {'custom_message': message, 'target_chat': TELEGRAM_SIGNAL_CHANNEL_ID})
@@ -788,8 +794,7 @@ async def analyze_performance_and_suggest(context: ContextTypes.DEFAULT_TYPE):
     settings = bot_data['settings']
     history = bot_data['scan_history']
     
-    # لا تقترح إذا لم يكن هناك تاريخ كافٍ أو تم الاقتراح مؤخراً
-    if len(history) < 5 or (time.time() - settings.get('last_suggestion_time', 0)) < 7200: # ساعتان
+    if len(history) < 5 or (time.time() - settings.get('last_suggestion_time', 0)) < 7200:
         return
 
     avg_signals = sum(item['signals'] for item in history) / len(history)
@@ -865,7 +870,7 @@ def generate_performance_report_string():
 main_menu_keyboard = [["Dashboard 🖥️"], ["⚙️ الإعدادات"], ["ℹ️ مساعدة"]]
 settings_menu_keyboard = [["🏁 أنماط جاهزة", "🎭 تفعيل/تعطيل الماسحات"], ["🔧 تعديل المعايير", "🔙 القائمة الرئيسية"]]
 
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("أهلاً بك في بوت المحلل الآلي! (v4 - المطور)", reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True))
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("أهلاً بك في بوت المحلل الآلي! (v5 - النهائي)", reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True))
 
 async def show_dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target_message = update.message or update.callback_query.message
@@ -952,26 +957,86 @@ async def strategy_report_command(update: Update, context: ContextTypes.DEFAULT_
     target_message = update.callback_query.message if update.callback_query else update.message
     await target_message.reply_text("⏳ جاري إعداد تقرير أداء الاستراتيجيات..."); report_string = generate_performance_report_string()
     await target_message.reply_text(report_string, parse_mode=ParseMode.MARKDOWN)
+
+# [تحديث واجهة المستخدم] التقرير اليومي المطور
 async def send_daily_report(context: ContextTypes.DEFAULT_TYPE):
-    today_str = datetime.now(EGYPT_TZ).strftime('%Y-%m-%d'); logger.info(f"Generating daily report for {today_str}...")
+    today_str = datetime.now(EGYPT_TZ).strftime('%Y-%m-%d')
+    logger.info(f"Generating detailed daily report for {today_str}...")
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=10); cursor = conn.cursor()
-        cursor.execute("SELECT status, pnl_usdt FROM trades WHERE DATE(closed_at) = ?", (today_str,)); closed_today = cursor.fetchall(); conn.close()
-        if not closed_today: report_message = f"🗓️ *التقرير اليومي ليوم {today_str}*\n\nلم يتم إغلاق أي صفقات اليوم."
+        conn = sqlite3.connect(DB_FILE, timeout=10)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT symbol, status, pnl_usdt, entry_value_usdt, reason FROM trades WHERE DATE(closed_at) = ?", (today_str,))
+        closed_today = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+
+        if not closed_today:
+            report_message = f"**🗓️ التقرير اليومي | {today_str}**\n\nلم يتم إغلاق أي صفقات اليوم."
         else:
-            wins = sum(1 for status, _ in closed_today if status == 'ناجحة')
-            losses = len(closed_today) - wins
-            total_pnl = sum(pnl for _, pnl in closed_today if pnl is not None)
-            win_rate = (wins / len(closed_today) * 100) if closed_today else 0
-            report_message = (f"🗓️ *التقرير اليومي ليوم {today_str}*\n\n"
-                              f"▫️ *إجمالي الصفقات المغلقة:* `{len(closed_today)}`\n✅ *الرابحة:* `{wins}` | ❌ *الخاسرة:* `{losses}`\n\n"
-                              f"📈 *معدل النجاح:* `{win_rate:.2f}%`\n💰 *الربح/الخسارة:* `${total_pnl:+.2f}`")
+            wins = [t for t in closed_today if t['status'] == 'ناجحة']
+            losses = [t for t in closed_today if t['status'] == 'فاشلة']
+            total_pnl = sum(t['pnl_usdt'] for t in closed_today if t['pnl_usdt'] is not None)
+            win_rate = (len(wins) / len(closed_today) * 100) if closed_today else 0
+            
+            current_balance = bot_data['settings']['virtual_portfolio_balance_usdt']
+            start_of_day_balance = current_balance - total_pnl
+
+            # تحليل أبرز الصفقات
+            best_trade = max(closed_today, key=lambda t: t.get('pnl_usdt', -float('inf')))
+            worst_trade = min(closed_today, key=lambda t: t.get('pnl_usdt', float('inf')))
+
+            # تحليل الاستراتيجيات
+            strategy_counter = Counter()
+            strategy_wins = defaultdict(int)
+            for trade in closed_today:
+                reasons = trade['reason'].split(' + ')
+                for reason in reasons:
+                    strategy_counter[reason] += 1
+                    if trade['status'] == 'ناجحة':
+                        strategy_wins[reason] += 1
+            
+            most_active_strategy_en = strategy_counter.most_common(1)[0][0] if strategy_counter else "N/A"
+            most_active_strategy_ar = STRATEGY_NAMES_AR.get(most_active_strategy_en, most_active_strategy_en)
+
+            # بناء الرسالة
+            parts = [f"**🗓️ التقرير اليومي المفصل | {today_str}**\n"]
+            
+            parts.append("💰 **الأداء المالي:**")
+            parts.append(f"  - الربح/الخسارة الصافي: `${total_pnl:+.2f}`")
+            parts.append(f"  - تغير رصيد المحفظة: `${start_of_day_balance:,.2f} ⬅️ ${current_balance:,.2f}`\n")
+
+            parts.append("📊 **إحصائيات الصفقات:**")
+            parts.append(f"  - الإجمالي: {len(closed_today)}")
+            parts.append(f"  - ✅ الرابحة: {len(wins)}")
+            parts.append(f"  - ❌ الخاسرة: {len(losses)}")
+            parts.append(f"  - معدل النجاح: {win_rate:.1f}%\n")
+
+            parts.append("🏆 **أبرز صفقات اليوم:**")
+            if best_trade and best_trade.get('pnl_usdt', 0) > 0:
+                pnl = best_trade['pnl_usdt']
+                pnl_percent = (pnl / best_trade['entry_value_usdt'] * 100) if best_trade['entry_value_usdt'] > 0 else 0
+                parts.append(f"  - الأفضل: `{best_trade['symbol']}` | `${pnl:+.2f}` (`{pnl_percent:+.1f}%`)")
+            if worst_trade and worst_trade.get('pnl_usdt', 0) < 0:
+                pnl = worst_trade['pnl_usdt']
+                pnl_percent = (pnl / worst_trade['entry_value_usdt'] * 100) if worst_trade['entry_value_usdt'] > 0 else 0
+                parts.append(f"  - الأسوأ: `{worst_trade['symbol']}` | `${pnl:.2f}` (`{pnl_percent:.1f}%`)")
+            parts.append("")
+
+            parts.append("💡 **الأداء حسب الاستراتيجية:**")
+            parts.append(f"  - الاستراتيجية الأنشط اليوم: *{most_active_strategy_ar}*")
+            
+            parts.append("\n- - - - - - - - - - - - - - - - - -")
+            parts.append("*رسالة اليوم: \"النجاح في التداول هو نتيجة للانضباط والصبر والتعلم المستمر.\"*")
+
+            report_message = "\n".join(parts)
+
         await send_telegram_message(context.bot, {'custom_message': report_message, 'target_chat': TELEGRAM_SIGNAL_CHANNEL_ID})
     except Exception as e:
-        logger.error(f"Failed to generate daily report: {e}", exc_info=True)
+        logger.error(f"Failed to generate detailed daily report: {e}", exc_info=True)
+
 async def daily_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target_message = update.callback_query.message if update.callback_query else update.message
-    await target_message.reply_text("⏳ جاري إرسال التقرير اليومي...")
+    await target_message.reply_text("⏳ جاري إرسال التقرير اليومي المفصل...")
     await send_daily_report(context)
     await target_message.reply_text("✅ تم إرسال التقرير بنجاح إلى القناة.")
 
@@ -1001,9 +1066,10 @@ async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     parts.append(f"- **مؤشر الخوف والطمع:** `{fng_text}`")
     
     status = bot_data['status_snapshot']
+    scan_duration_str = status.get('last_scan_start_time', 'N/A')
     scan_duration = "N/A"
-    if status['last_scan_end_time'] != 'N/A' and status['last_scan_start_time'] != 'N/A':
-        duration_sec = (datetime.strptime(status['last_scan_end_time'], '%Y-%m-%d %H:%M:%S') - datetime.strptime(status['last_scan_start_time'], '%Y-%m-%d %H:%M:%S')).total_seconds()
+    if status['last_scan_end_time'] != 'N/A' and scan_duration_str != 'N/A':
+        duration_sec = (datetime.strptime(status['last_scan_end_time'], '%Y-%m-%d %H:%M:%S') - datetime.strptime(scan_duration_str, '%Y-%m-%d %H:%M:%S')).total_seconds()
         scan_duration = f"{duration_sec:.0f} ثانية"
     parts.append("\n**[ 🔬 أداء آخر فحص ]**")
     parts.append(f"- **وقت البدء:** `{status['last_scan_start_time']}`")
@@ -1091,7 +1157,6 @@ async def show_active_trades_command(update: Update, context: ContextTypes.DEFAU
 async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query; await query.answer(); data = query.data
     
-    # معالج أزرار لوحة التحكم
     if data.startswith("dashboard_"):
         action = data.split("_", 1)[1]
         if action == "stats": await stats_command(update, context)
@@ -1144,7 +1209,6 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     elif data.startswith("check_"):
         await check_trade_command(update, context, trade_id_from_callback=int(data.split("_")[1]))
     
-    # [ميزة جديدة] معالج أزرار الاقتراحات الذكية
     elif data.startswith("suggest_"):
         action = data.split("_", 1)[1]
         if action.startswith("accept"):
@@ -1211,18 +1275,17 @@ async def post_init(application: Application):
     job_queue.run_repeating(track_open_trades, interval=TRACK_INTERVAL_SECONDS, first=20, name='track_open_trades')
     job_queue.run_daily(send_daily_report, time=dt_time(hour=23, minute=55, tzinfo=EGYPT_TZ), name='daily_report')
     logger.info(f"Jobs scheduled. Daily report at 23:55 {EGYPT_TZ}.")
-    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *المحلل الآلي جاهز للعمل! (v4 - الذكي)*", parse_mode=ParseMode.MARKDOWN)
+    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *المحلل الآلي جاهز للعمل! (v5 - النهائي)*", parse_mode=ParseMode.MARKDOWN)
     logger.info("Post-init finished.")
 async def post_shutdown(application: Application): await asyncio.gather(*[ex.close() for ex in bot_data["exchanges"].values()]); logger.info("All exchange connections closed.")
 
 def main():
-    print("🚀 Starting Pro Trading Analyzer Bot v4 (Smart UI)...")
+    print("🚀 Starting Pro Trading Analyzer Bot v5 (Final)...")
     load_settings(); init_database()
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).post_shutdown(post_shutdown).build()
 
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("check", check_trade_command))
-    # تم دمج باقي الأوامر في لوحة التحكم
     application.add_handler(CallbackQueryHandler(button_callback_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, main_text_handler))
     application.add_error_handler(error_handler)
