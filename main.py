@@ -64,9 +64,8 @@ SCAN_INTERVAL_SECONDS = 900
 TRACK_INTERVAL_SECONDS = 120
 
 APP_ROOT = '.'
-# [تحديث] تم تحديث الإصدار إلى v10
-DB_FILE = os.path.join(APP_ROOT, 'trading_bot_v10.db')
-SETTINGS_FILE = os.path.join(APP_ROOT, 'settings_v10.json')
+DB_FILE = os.path.join(APP_ROOT, 'trading_bot_v11.db')
+SETTINGS_FILE = os.path.join(APP_ROOT, 'settings_v11.json')
 DATA_CACHE_DIR = Path(APP_ROOT) / 'data_cache'
 DATA_CACHE_DIR.mkdir(exist_ok=True)
 
@@ -74,7 +73,7 @@ DATA_CACHE_DIR.mkdir(exist_ok=True)
 EGYPT_TZ = ZoneInfo("Africa/Cairo")
 
 # --- إعداد مسجل الأحداث (Logger) --- #
-LOG_FILE = os.path.join(APP_ROOT, 'bot_v10.log')
+LOG_FILE = os.path.join(APP_ROOT, 'bot_v11.log')
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO, handlers=[logging.FileHandler(LOG_FILE, 'a'), logging.StreamHandler()])
 logging.getLogger('httpx').setLevel(logging.WARNING)
 logging.getLogger('apscheduler').setLevel(logging.WARNING)
@@ -111,12 +110,13 @@ PRESET_VERY_LAX = {
 PRESETS = {"PRO": PRESET_PRO, "LAX": PRESET_LAX, "STRICT": PRESET_STRICT, "VERY_LAX": PRESET_VERY_LAX}
 
 STRATEGY_NAMES_AR = {
-    "Momentum Breakout": "زخم اختراقي",
-    "Squeeze Breakout": "اختراق انضغاطي",
-    "RSI Divergence": "دايفرجنس RSI",
-    "Supertrend Flip": "انعكاس سوبرترند"
+    "momentum_breakout": "زخم اختراقي",
+    "breakout_squeeze_pro": "اختراق انضغاطي",
+    "rsi_divergence": "دايفرجنس RSI",
+    "supertrend_pullback": "انعكاس سوبرترند"
 }
 
+# [جديد] تعريف المعايير القابلة للتحسين لكل استراتيجية
 OPTIMIZABLE_PARAMS_GRID = {
     "supertrend_pullback": {
         "atr_period": [7, 10, 14],
@@ -126,6 +126,10 @@ OPTIMIZABLE_PARAMS_GRID = {
         "bbands_period": [20, 25],
         "keltner_period": [20, 25],
         "keltner_atr_multiplier": [1.5, 2.0]
+    },
+    "momentum_breakout": {
+        "rsi_max_level": [65, 70, 75],
+        "bbands_stddev": [2.0, 2.5]
     }
 }
 
@@ -342,7 +346,7 @@ def analyze_momentum_breakout(df, params, rvol, adx_value):
     if (prev[macd_col] <= prev[macds_col] and last[macd_col] > last[macds_col] and
         last['close'] > last[bbu_col] and last['close'] > last["VWAP_D"] and
         last[rsi_col] < params['rsi_max_level'] and rvol_ok):
-        return {"reason": "Momentum Breakout", "type": "long"}
+        return {"reason": "momentum_breakout", "type": "long"}
     return None
 
 def analyze_breakout_squeeze_pro(df, params, rvol, adx_value):
@@ -363,7 +367,7 @@ def analyze_breakout_squeeze_pro(df, params, rvol, adx_value):
         obv_rising = df['OBV'].iloc[-2] > df['OBV'].iloc[-3]
         if breakout_fired and rvol_ok and obv_rising:
             if params.get('volume_confirmation_enabled', True) and not volume_ok: return None
-            return {"reason": "Squeeze Breakout", "type": "long"}
+            return {"reason": "breakout_squeeze_pro", "type": "long"}
     return None
 
 def analyze_rsi_divergence(df, params, rvol, adx_value):
@@ -384,7 +388,7 @@ def analyze_rsi_divergence(df, params, rvol, adx_value):
             confirmation_price = subset.iloc[p_low2_idx:]['high'].max()
             price_confirmed = df.iloc[-2]['close'] > confirmation_price
             if (not params['confirm_with_rsi_exit'] or rsi_exits_oversold) and price_confirmed:
-                return {"reason": "RSI Divergence", "type": "long"}
+                return {"reason": "rsi_divergence", "type": "long"}
     return None
 
 def analyze_supertrend_pullback(df, params, rvol, adx_value):
@@ -401,7 +405,7 @@ def analyze_supertrend_pullback(df, params, rvol, adx_value):
         recent_swing_high = df['high'].iloc[-params.get('swing_high_lookback', 10):-2].max()
         breakout_ok = last['close'] > recent_swing_high
         if ema_ok and adx_ok and rvol_ok and breakout_ok:
-            return {"reason": "Supertrend Flip", "type": "long"}
+            return {"reason": "supertrend_pullback", "type": "long"}
     return None
 
 SCANNERS = {
@@ -853,7 +857,7 @@ async def analyze_performance_and_suggest(context: ContextTypes.DEFAULT_TYPE):
         save_settings()
 
 
-# --- [جديد وقيد الإصلاح] قسم مختبر الاستراتيجيات (Backtesting & Optimization) ---
+# --- [تحديث] قسم مختبر الاستراتيجيات (Backtesting & Optimization) ---
 
 async def fetch_and_cache_data(symbol, timeframe, days):
     """Fetches historical data from Binance and caches it to a file."""
@@ -866,9 +870,6 @@ async def fetch_and_cache_data(symbol, timeframe, days):
     logger.info(f"Fetching new historical data for {symbol} for the last {days} days...")
     exchange = ccxt_async.binance({'enableRateLimit': True})
     
-    # [FIX] The Binance API requires the 'since' timestamp to be an integer.
-    # The previous calculation could result in a float, causing an API error.
-    # Casting to int() ensures the timestamp is in the correct format.
     since = int(exchange.milliseconds() - timedelta(days=days).total_seconds() * 1000)
     limit = 1000 
     all_ohlcv = []
@@ -895,32 +896,10 @@ async def fetch_and_cache_data(symbol, timeframe, days):
     logger.info(f"Saved data for {symbol} to {cache_file}")
     return df
 
-async def backtest_runner_job(context: ContextTypes.DEFAULT_TYPE):
-    """Job function to run a single backtest in the background."""
-    job_data = context.job.data
-    chat_id = job_data['chat_id']
-    symbol = job_data['symbol']
-    strategy_name = job_data['strategy_name']
-    days = job_data['days']
-
-    await context.bot.send_message(chat_id, f"🔍 جاري تحميل البيانات التاريخية لـ `{symbol}`...", parse_mode=ParseMode.MARKDOWN)
-    
-    df = await fetch_and_cache_data(symbol, TIMEFRAME, days)
-
-    if df is None or df.empty:
-        await context.bot.send_message(chat_id, f"❌ فشل تحميل البيانات التاريخية لـ `{symbol}`. الرجاء المحاولة مرة أخرى.", parse_mode=ParseMode.MARKDOWN)
-        return
-
-    await context.bot.send_message(chat_id, f"⚙️ بدء محاكاة التداول على بيانات {days} يوم...")
-
-    test_settings = bot_data['settings'].copy()
-    if 'params' in job_data:
-        test_settings[strategy_name].update(job_data['params'])
-
+# [إعادة هيكلة] تم فصل منطق الاختبار المسبق في دالة مستقلة لإعادة استخدامه
+def run_single_backtest(df: pd.DataFrame, strategy_name: str, test_settings: dict):
     scanner_func = SCANNERS.get(strategy_name)
-    if not scanner_func:
-        await context.bot.send_message(chat_id, f"❌ استراتيجية غير معروفة: {strategy_name}")
-        return
+    if not scanner_func: return None
 
     balance = 1000.0
     trades = []
@@ -928,6 +907,7 @@ async def backtest_runner_job(context: ContextTypes.DEFAULT_TYPE):
     entry_price = 0
     portfolio_history = [balance]
 
+    # Pre-calculate all indicators once to save time
     df.ta.bbands(length=20, append=True)
     df.ta.kc(length=20, append=True)
     df.ta.supertrend(length=10, multiplier=3, append=True)
@@ -941,7 +921,8 @@ async def backtest_runner_job(context: ContextTypes.DEFAULT_TYPE):
         row = df.iloc[i]
         
         if not in_trade:
-            signal = scanner_func(df.iloc[:i+1], test_settings.get(strategy_name, {}), 1.5, 25) 
+            # Pass a copy of the dataframe up to the current point
+            signal = scanner_func(df.iloc[:i+1].copy(), test_settings.get(strategy_name, {}), 1.5, 25) 
             if signal:
                 in_trade = True
                 entry_price = row['close']
@@ -966,16 +947,13 @@ async def backtest_runner_job(context: ContextTypes.DEFAULT_TYPE):
 
     total_trades = len(trades)
     if total_trades == 0:
-        await context.bot.send_message(chat_id, f"ℹ️ لم يتم العثور على أي صفقات لـ `{symbol}` باستراتيجية `{strategy_name}` خلال الفترة المحددة.", parse_mode=ParseMode.MARKDOWN)
-        return
+        return {"total_trades": 0}
 
     wins = [t for t in trades if t > 0]
-    losses = [t for t in trades if t < 0]
-    win_rate = (len(wins) / total_trades * 100) if total_trades > 0 else 0
+    win_rate = (len(wins) / total_trades * 100)
     total_pnl_percent = (balance / 1000.0 - 1) * 100
-
     gross_profit = sum(wins)
-    gross_loss = abs(sum(losses))
+    gross_loss = abs(sum(t for t in trades if t < 0))
     profit_factor = gross_profit / gross_loss if gross_loss > 0 else float('inf')
 
     peak = portfolio_history[0]
@@ -985,29 +963,109 @@ async def backtest_runner_job(context: ContextTypes.DEFAULT_TYPE):
         dd = (peak - value) / peak
         if dd > max_dd: max_dd = dd
     
-    params_str = ""
-    if 'params' in job_data:
-        params_str = "\n".join([f"  - `{k}`: `{v}`" for k, v in job_data['params'].items()])
-        params_str = f"\n*الإعدادات المستخدمة:*\n{params_str}"
+    return {
+        "params": test_settings.get(strategy_name),
+        "total_pnl_percent": total_pnl_percent,
+        "total_trades": total_trades,
+        "win_rate": win_rate,
+        "profit_factor": profit_factor,
+        "max_dd": max_dd
+    }
 
+async def backtest_runner_job(context: ContextTypes.DEFAULT_TYPE):
+    """Job function to run a single backtest in the background."""
+    job_data = context.job.data
+    chat_id, symbol, strategy_name, days = job_data['chat_id'], job_data['symbol'], job_data['strategy_name'], job_data['days']
+
+    await context.bot.send_message(chat_id, f"🔍 جاري تحميل البيانات التاريخية لـ `{symbol}`...", parse_mode=ParseMode.MARKDOWN)
+    df = await fetch_and_cache_data(symbol, TIMEFRAME, days)
+    if df is None or df.empty:
+        await context.bot.send_message(chat_id, f"❌ فشل تحميل البيانات التاريخية لـ `{symbol}`. الرجاء المحاولة مرة أخرى.", parse_mode=ParseMode.MARKDOWN)
+        return
+
+    await context.bot.send_message(chat_id, f"⚙️ بدء محاكاة التداول على بيانات {days} يوم...")
+    
+    results = run_single_backtest(df, strategy_name, bot_data['settings'])
+
+    if not results or results['total_trades'] == 0:
+        await context.bot.send_message(chat_id, f"ℹ️ لم يتم العثور على أي صفقات لـ `{symbol}` باستراتيجية `{STRATEGY_NAMES_AR.get(strategy_name, strategy_name)}` خلال الفترة المحددة.", parse_mode=ParseMode.MARKDOWN)
+        return
+    
     report = (f"**🧪 نتائج الاختبار المسبق (Backtest)**\n\n"
               f"- **العملة:** `{symbol}`\n"
               f"- **الاستراتيجية:** `{STRATEGY_NAMES_AR.get(strategy_name, strategy_name)}`\n"
-              f"- **الفترة:** آخر {days} يوم\n"
-              f"{params_str}\n"
+              f"- **الفترة:** آخر {days} يوم\n\n"
               f"--- **النتائج** ---\n"
-              f"💰 **إجمالي الربح/الخسارة:** `{total_pnl_percent:+.2f}%`\n"
-              f"📈 **إجمالي الصفقات:** `{total_trades}`\n"
-              f"✅ **معدل النجاح:** `{win_rate:.2f}%`\n"
-              f"⚖️ **معامل الربح:** `{profit_factor:.2f}`\n"
-              f"📉 **أقصى تراجع:** `-{max_dd*100:.2f}%`")
+              f"💰 **إجمالي الربح/الخسارة:** `{results['total_pnl_percent']:+.2f}%`\n"
+              f"📈 **إجمالي الصفقات:** `{results['total_trades']}`\n"
+              f"✅ **معدل النجاح:** `{results['win_rate']:.2f}%`\n"
+              f"⚖️ **معامل الربح:** `{results['profit_factor']:.2f}`\n"
+              f"📉 **أقصى تراجع:** `-{results['max_dd']*100:.2f}%`")
     
     await context.bot.send_message(chat_id, report, parse_mode=ParseMode.MARKDOWN)
 
-
+# [جديد] مهمة مكتشف أفضل الإعدادات (Optimizer)
 async def optimization_runner_job(context: ContextTypes.DEFAULT_TYPE):
-    await asyncio.sleep(10)
-    await context.bot.send_message(context.job.data['chat_id'], "🤖 **اكتملت عملية التحسين!**\n\n(هذه ميزة تجريبية، سيتم عرض النتائج هنا في التحديثات المستقبلية.)")
+    job_data = context.job.data
+    chat_id, symbol, strategy_name, days = job_data['chat_id'], job_data['symbol'], job_data['strategy_name'], job_data['days']
+
+    await context.bot.send_message(chat_id, f"🔍 جاري تحميل البيانات التاريخية لـ `{symbol}`...", parse_mode=ParseMode.MARKDOWN)
+    df = await fetch_and_cache_data(symbol, TIMEFRAME, days)
+    if df is None or df.empty:
+        await context.bot.send_message(chat_id, f"❌ فشل تحميل البيانات التاريخية لـ `{symbol}`. الرجاء المحاولة مرة أخرى.", parse_mode=ParseMode.MARKDOWN)
+        return
+    
+    param_grid = OPTIMIZABLE_PARAMS_GRID.get(strategy_name)
+    if not param_grid:
+        await context.bot.send_message(chat_id, f"❌ لا توجد إعدادات قابلة للتحسين لهذه الاستراتيجية: {strategy_name}")
+        return
+
+    keys, values = zip(*param_grid.items())
+    param_combinations = [dict(zip(keys, v)) for v in itertools.product(*values)]
+    
+    await context.bot.send_message(chat_id, f"🤖 **بدء عملية التحسين...**\n\nسيتم اختبار *{len(param_combinations)}* توليفة مختلفة من الإعدادات. قد تستغرق هذه العملية بعض الوقت...", parse_mode=ParseMode.MARKDOWN)
+
+    all_results = []
+    base_settings = bot_data['settings'].copy()
+
+    for i, params in enumerate(param_combinations):
+        current_settings = json.loads(json.dumps(base_settings)) # Deep copy
+        current_settings[strategy_name].update(params)
+        
+        result = run_single_backtest(df.copy(), strategy_name, current_settings)
+        if result and result['total_trades'] > 0:
+            result['params'] = params
+            all_results.append(result)
+
+        if (i + 1) % 5 == 0 or (i + 1) == len(param_combinations):
+             try:
+                await context.bot.send_message(chat_id, f"⏳ *جاري التحسين...* `({i+1}/{len(param_combinations)})`", parse_mode=ParseMode.MARKDOWN)
+             except: pass
+    
+    if not all_results:
+        await context.bot.send_message(chat_id, f"ℹ️ لم يتم العثور على أي صفقات ناجحة بأي توليفة إعدادات. قد تحتاج لتوسيع نطاق البحث أو تجربة فترة زمنية مختلفة.", parse_mode=ParseMode.MARKDOWN)
+        return
+
+    # Find the best result (highest profit factor, then highest P&L)
+    best_result = max(all_results, key=lambda r: (r['profit_factor'], r['total_pnl_percent']))
+
+    params_str = "\n".join([f"  - `{k}`: `{v}`" for k, v in best_result['params'].items()])
+
+    report = (f"**🏆 اكتمل التحسين! أفضل نتيجة تم إيجادها:**\n\n"
+              f"- **العملة:** `{symbol}`\n"
+              f"- **الاستراتيجية:** `{STRATEGY_NAMES_AR.get(strategy_name, strategy_name)}`\n"
+              f"- **الفترة:** آخر {days} يوم\n\n"
+              f"--- **أفضل الإعدادات** ---\n"
+              f"{params_str}\n\n"
+              f"--- **النتائج بهذه الإعدادات** ---\n"
+              f"💰 **إجمالي الربح/الخسارة:** `{best_result['total_pnl_percent']:+.2f}%`\n"
+              f"📈 **إجمالي الصفقات:** `{best_result['total_trades']}`\n"
+              f"✅ **معدل النجاح:** `{best_result['win_rate']:.2f}%`\n"
+              f"⚖️ **معامل الربح:** `{best_result['profit_factor']:.2f}`\n"
+              f"📉 **أقصى تراجع:** `-{best_result['max_dd']*100:.2f}%`\n\n"
+              f"*يمكنك الآن تطبيق هذه الإعدادات يدوياً من قائمة الإعدادات لتحسين أداء البوت.*")
+
+    await context.bot.send_message(chat_id, report, parse_mode=ParseMode.MARKDOWN)
 
 async def lab_conversation_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_data = context.user_data
@@ -1022,8 +1080,14 @@ async def lab_conversation_handler(update: Update, context: ContextTypes.DEFAULT
         user_data['lab_symbol'] = text
         user_data['lab_state'] = 'awaiting_strategy'
         
-        keyboard = [[InlineKeyboardButton(STRATEGY_NAMES_AR.get(name, name), callback_data=f"lab_strategy_{name}")] for name in SCANNERS.keys()]
-        await update.message.reply_text("اختر الاستراتيجية للاختبار:", reply_markup=InlineKeyboardMarkup(keyboard))
+        strategies_to_show = SCANNERS.keys()
+        if user_data.get('lab_mode') == 'optimize':
+            strategies_to_show = OPTIMIZABLE_PARAMS_GRID.keys()
+
+        keyboard = [[InlineKeyboardButton(STRATEGY_NAMES_AR.get(name, name), callback_data=f"lab_strategy_{name}")] for name in strategies_to_show]
+        
+        mode_text = "للاختبار" if user_data.get('lab_mode') == 'backtest' else "للتحسين"
+        await update.message.reply_text(f"اختر الاستراتيجية {mode_text}:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 
 # --- Reports and Telegram Commands (Modified) ---
@@ -1036,11 +1100,11 @@ def generate_performance_report_string():
         cursor.execute("SELECT reason, status, entry_price, highest_price FROM trades WHERE status IN ('ناجحة', 'فاشلة') AND timestamp >= ?", (start_date,)); trades = cursor.fetchall(); conn.close()
     except Exception as e: return f"❌ حدث خطأ غير متوقع: {e}"
     if not trades: return f"ℹ️ لا توجد صفقات مغلقة في آخر {REPORT_DAYS} يومًا."
-    strategy_stats = {}
+    strategy_stats = defaultdict(lambda: {'total': 0, 'successful': 0, 'max_profits': []})
     for trade in trades:
         reasons = trade['reason'].split(' + ')
         for reason in reasons:
-            stats = strategy_stats.setdefault(reason, {'total': 0, 'successful': 0, 'max_profits': []})
+            stats = strategy_stats[reason]
             stats['total'] += 1
             if trade['status'] == 'ناجحة': stats['successful'] += 1
             if trade['entry_price'] > 0 and trade['highest_price'] is not None:
@@ -1057,7 +1121,7 @@ def generate_performance_report_string():
 main_menu_keyboard = [["Dashboard 🖥️"], ["⚙️ الإعدادات"], ["ℹ️ مساعدة"]]
 settings_menu_keyboard = [["🏁 أنماط جاهزة", "🎭 تفعيل/تعطيل الماسحات"], ["🔧 تعديل المعايير", "🔙 القائمة الرئيسية"]]
 
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("أهلاً بك في بوت المحلل الآلي! (v10 - إصدار نهائي)", reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True))
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("أهلاً بك في بوت المحلل الآلي! (v11 - ميزة التحسين مفعلة)", reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True))
 
 async def show_dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target_message = update.message or update.callback_query.message
@@ -1079,7 +1143,7 @@ async def show_settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 def get_scanners_keyboard():
     active_scanners = bot_data["settings"].get("active_scanners", [])
-    keyboard = [[InlineKeyboardButton(f"{'✅' if name in active_scanners else '❌'} {name}", callback_data=f"toggle_{name}")] for name in SCANNERS.keys()]
+    keyboard = [[InlineKeyboardButton(f"{'✅' if name in active_scanners else '❌'} {STRATEGY_NAMES_AR.get(name, name)}", callback_data=f"toggle_{name}")] for name in SCANNERS.keys()]
     keyboard.append([InlineKeyboardButton("🔙 العودة للإعدادات", callback_data="back_to_settings")])
     return InlineKeyboardMarkup(keyboard)
 
@@ -1349,7 +1413,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         elif action == "daily_report": await daily_report_command(update, context)
         elif action == "debug": await debug_command(update, context)
         elif action == "refresh": await show_dashboard_command(update, context)
-        elif action == "lab": # [جديد]
+        elif action == "lab":
             keyboard = [[InlineKeyboardButton("🧪 إجراء اختبار مسبق (Backtest)", callback_data="lab_start_backtest")],
                         [InlineKeyboardButton("🤖 البحث عن أفضل الإعدادات (Optimize)", callback_data="lab_start_optimize")]]
             await query.edit_message_text("🔬 **مختبر الاستراتيجيات**\n\nاختر الأداة التي تريد استخدامها:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
@@ -1358,12 +1422,12 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     # --- Strategy Lab Flow ---
     elif data.startswith("lab_"):
         action = data.split("_", 1)[1]
-        if action == "start_backtest":
-            user_data['lab_mode'] = 'backtest'
+        if action == "start_backtest" or action == "start_optimize":
+            user_data['lab_mode'] = 'backtest' if action == "start_backtest" else 'optimize'
             user_data['lab_state'] = 'awaiting_symbol'
-            await query.edit_message_text("✍️ **بدء اختبار مسبق**\n\nالرجاء إرسال رمز العملة التي تريد اختبارها (مثال: `BTC/USDT`).", parse_mode=ParseMode.MARKDOWN)
-        elif action == "start_optimize":
-            await query.edit_message_text("🤖 **قيد التطوير**\n\nميزة البحث عن أفضل الإعدادات ستكون متاحة قريباً!", parse_mode=ParseMode.MARKDOWN)
+            mode_text = "اختبار مسبق" if user_data['lab_mode'] == 'backtest' else "البحث عن أفضل الإعدادات"
+            await query.edit_message_text(f"✍️ **بدء {mode_text}**\n\nالرجاء إرسال رمز العملة (مثال: `BTC/USDT`).", parse_mode=ParseMode.MARKDOWN)
+        
         elif action.startswith("strategy"):
             if user_data.get('lab_state') == 'awaiting_strategy':
                 strategy_name = data.split("_", 2)[2]
@@ -1372,18 +1436,27 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
                 keyboard = [[InlineKeyboardButton("آخر شهر", callback_data="lab_period_30"),
                              InlineKeyboardButton("آخر 3 أشهر", callback_data="lab_period_90")],
                             [InlineKeyboardButton("آخر 6 أشهر", callback_data="lab_period_180")]]
-                await query.edit_message_text("🗓️ اختر الفترة الزمنية للاختبار:", reply_markup=InlineKeyboardMarkup(keyboard))
+                await query.edit_message_text("🗓️ اختر الفترة الزمنية:", reply_markup=InlineKeyboardMarkup(keyboard))
+        
         elif action.startswith("period"):
             if user_data.get('lab_state') == 'awaiting_period':
                 days = int(data.split("_")[2])
-                await query.edit_message_text(f"⏳ **جاري جدولة الاختبار...**\n\nسيتم إجراء الاختبار في الخلفية. سأقوم بإعلامك بالنتائج فور جهوزها.", parse_mode=ParseMode.MARKDOWN)
+                job_to_run, message_text = None, ""
                 
-                context.job_queue.run_once(backtest_runner_job, 1, data={
-                    'chat_id': query.message.chat_id,
-                    'symbol': user_data['lab_symbol'],
-                    'strategy_name': user_data['lab_strategy'],
-                    'days': days
-                }, name=f"backtest_{query.message.chat_id}_{time.time()}")
+                if user_data.get('lab_mode') == 'backtest':
+                    job_to_run = backtest_runner_job
+                    message_text = f"⏳ **جاري جدولة الاختبار...**\n\nسيتم إجراء الاختبار في الخلفية. سأقوم بإعلامك بالنتائج فور جهوزها."
+                elif user_data.get('lab_mode') == 'optimize':
+                    job_to_run = optimization_runner_job
+                    message_text = f"⏳ **جاري جدولة عملية التحسين...**\n\nستعمل في الخلفية. سأقوم بإعلامك بأفضل النتائج فور جهوزها."
+                
+                await query.edit_message_text(message_text, parse_mode=ParseMode.MARKDOWN)
+                
+                if job_to_run:
+                    context.job_queue.run_once(job_to_run, 1, data={
+                        'chat_id': query.message.chat_id, 'symbol': user_data['lab_symbol'],
+                        'strategy_name': user_data['lab_strategy'], 'days': days
+                    }, name=f"lab_{user_data['lab_mode']}_{query.message.chat_id}_{time.time()}")
                 
                 for key in ['lab_mode', 'lab_state', 'lab_symbol', 'lab_strategy']:
                     user_data.pop(key, None)
@@ -1516,12 +1589,12 @@ async def post_init(application: Application):
     job_queue.run_repeating(track_open_trades, interval=TRACK_INTERVAL_SECONDS, first=20, name='track_open_trades')
     job_queue.run_daily(send_daily_report, time=dt_time(hour=23, minute=55, tzinfo=EGYPT_TZ), name='daily_report')
     logger.info(f"Jobs scheduled. Daily report at 23:55 {EGYPT_TZ}.")
-    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *المحلل الآلي جاهز للعمل! (v10 - الإصدار الأخير)*", parse_mode=ParseMode.MARKDOWN)
+    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *المحلل الآلي جاهز للعمل! (v11 - ميزة التحسين مفعلة)*", parse_mode=ParseMode.MARKDOWN)
     logger.info("Post-init finished.")
 async def post_shutdown(application: Application): await asyncio.gather(*[ex.close() for ex in bot_data["exchanges"].values()]); logger.info("All exchange connections closed.")
 
 def main():
-    print("🚀 Starting Pro Trading Analyzer Bot v10 (Final & Stable)...")
+    print("🚀 Starting Pro Trading Analyzer Bot v11 (Optimization Enabled)...")
     load_settings(); init_database()
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).post_shutdown(post_shutdown).build()
 
