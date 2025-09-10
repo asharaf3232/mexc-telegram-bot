@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 
 # --- المكتبات المطلوبة --- #
-# [إصلاح جذري] تم تصحيح استيراد المكتبة لمنع الأخطاء المتكررة
 import ccxt.async_support as ccxt_async
 import ccxt
 import pandas as pd
@@ -65,9 +64,9 @@ SCAN_INTERVAL_SECONDS = 900
 TRACK_INTERVAL_SECONDS = 120
 
 APP_ROOT = '.'
-# [تحديث] تم تحديث الإصدار إلى v9
-DB_FILE = os.path.join(APP_ROOT, 'trading_bot_v9.db')
-SETTINGS_FILE = os.path.join(APP_ROOT, 'settings_v9.json')
+# [تحديث] تم تحديث الإصدار إلى v10
+DB_FILE = os.path.join(APP_ROOT, 'trading_bot_v10.db')
+SETTINGS_FILE = os.path.join(APP_ROOT, 'settings_v10.json')
 DATA_CACHE_DIR = Path(APP_ROOT) / 'data_cache'
 DATA_CACHE_DIR.mkdir(exist_ok=True)
 
@@ -75,7 +74,7 @@ DATA_CACHE_DIR.mkdir(exist_ok=True)
 EGYPT_TZ = ZoneInfo("Africa/Cairo")
 
 # --- إعداد مسجل الأحداث (Logger) --- #
-LOG_FILE = os.path.join(APP_ROOT, 'bot_v9.log')
+LOG_FILE = os.path.join(APP_ROOT, 'bot_v10.log')
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO, handlers=[logging.FileHandler(LOG_FILE, 'a'), logging.StreamHandler()])
 logging.getLogger('httpx').setLevel(logging.WARNING)
 logging.getLogger('apscheduler').setLevel(logging.WARNING)
@@ -415,7 +414,6 @@ SCANNERS = {
 # --- Core Bot Functions ---
 async def initialize_exchanges():
     async def connect(ex_id):
-        # [إصلاح] استخدام ccxt_async بشكل صحيح
         exchange = getattr(ccxt_async, ex_id)({'enableRateLimit': True, 'options': {'defaultType': 'spot'}})
         try:
             await exchange.load_markets()
@@ -1055,7 +1053,7 @@ def generate_performance_report_string():
 main_menu_keyboard = [["Dashboard 🖥️"], ["⚙️ الإعدادات"], ["ℹ️ مساعدة"]]
 settings_menu_keyboard = [["🏁 أنماط جاهزة", "🎭 تفعيل/تعطيل الماسحات"], ["🔧 تعديل المعايير", "🔙 القائمة الرئيسية"]]
 
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("أهلاً بك في بوت المحلل الآلي! (v9 - إصدار المسؤولية)", reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True))
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("أهلاً بك في بوت المحلل الآلي! (v10 - إصدار نهائي)", reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True))
 
 async def show_dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target_message = update.message or update.callback_query.message
@@ -1514,12 +1512,12 @@ async def post_init(application: Application):
     job_queue.run_repeating(track_open_trades, interval=TRACK_INTERVAL_SECONDS, first=20, name='track_open_trades')
     job_queue.run_daily(send_daily_report, time=dt_time(hour=23, minute=55, tzinfo=EGYPT_TZ), name='daily_report')
     logger.info(f"Jobs scheduled. Daily report at 23:55 {EGYPT_TZ}.")
-    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *المحلل الآلي جاهز للعمل! (v9 - إصدار المسؤولية)*", parse_mode=ParseMode.MARKDOWN)
+    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *المحلل الآلي جاهز للعمل! (v10 - الإصدار الأخير)*", parse_mode=ParseMode.MARKDOWN)
     logger.info("Post-init finished.")
 async def post_shutdown(application: Application): await asyncio.gather(*[ex.close() for ex in bot_data["exchanges"].values()]); logger.info("All exchange connections closed.")
 
 def main():
-    print("🚀 Starting Pro Trading Analyzer Bot v9 (Stable & Fixed)...")
+    print("🚀 Starting Pro Trading Analyzer Bot v10 (Final & Stable)...")
     load_settings(); init_database()
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).post_shutdown(post_shutdown).build()
 
