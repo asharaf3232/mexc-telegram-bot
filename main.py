@@ -1,37 +1,4 @@
-    await context.bot.send_message(context.job.data['chat_id'], "🤖 **اكتملت عملية التحسين!**\n\n(هذه ميزة تجريبية، سيتم عرض النتائج هنا في التحديثات المستقبلية.)")
-
-# --- Interactive Conversation Flow for Strategy Lab ---
-async def lab_conversation_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles user text input during the lab setup conversation."""
-    user_data = context.user_data
-    if 'lab_state' not in user_data:
-        return # Not in a lab conversation, do nothing.
-
-    state = user_data['lab_state']
-    text = update.message.text.upper()
-
-    if state == 'awaiting_symbol':
-        # Basic validation
-        if '/' not in text or len(text.split('/')[0]) < 2:
-            await update.message.reply_text("❌ رمز غير صالح. الرجاء إرسال الرمز بالتنسيق الصحيح (مثال: `BTC/USDT`).", parse_mode=ParseMode.MARKDOWN)
-            return
-        
-        user_data['lab_symbol'] = text
-        user_data['lab_state'] = 'awaiting_strategy'
-        
-        keyboard = [[InlineKeyboardButton(STRATEGY_NAMES_AR.get(name, name), callback_data=f"lab_strategy_{name}")] for name in SCANNERS.keys()]
-        await update.message.reply_text("اختر الاستراتيجية للاختبار:", reply_markup=InlineKeyboardMarkup(keyboard))
-    
-    # If user types a command, let's exit the conversation gracefully
-    elif text.startswith('/'):
-        for key in ['lab_mode', 'lab_state', 'lab_symbol', 'lab_strategy']:
-            user_data.pop(key, None)
-        # We don't handle the command here, we just exit the state
-        # The command will be handled by its own handler.
-        logger.info("Exited strategy lab conversation due to new command.")
-
-# --- Reports and Telegram Commands (Modified) ---
-
+# -*- coding: utf-8 -*-
 
 # --- المكتبات المطلوبة --- #
 import ccxt.async_support as ccxt
@@ -888,8 +855,191 @@ async def analyze_performance_and_suggest(context: ContextTypes.DEFAULT_TYPE):
         save_settings()
 
 
-# --- Reports and Telegram Commands ---
+# --- [جديد] قسم مختبر الاستراتيجيات (Backtesting & Optimization) ---
 
+async def fetch_and_cache_data(symbol, timeframe, days):
+    """Fetches historical data from Binance and caches it to a file."""
+    cache_file = DATA_CACHE_DIR / f"{symbol.replace('/', '_')}_{timeframe}_{days}d.csv"
+    
+    if cache_file.exists() and (time.time() - cache_file.stat().st_mtime) < 86400: # Cache valid for 1 day
+        logger.info(f"Loading cached data for {symbol} from {cache_file}")
+        return pd.read_csv(cache_file, index_col='timestamp', parse_dates=True)
+
+    logger.info(f"Fetching new historical data for {symbol} for the last {days} days...")
+    exchange = ccxt.binance() # Use a synchronous instance for fetching historical data
+    since = exchange.milliseconds() - timedelta(days=days).total_seconds() * 1000
+    limit = 1000 
+    all_ohlcv = []
+    
+    # Use async for network calls inside the sync function context
+    async def fetch_ohlcv_async(symbol, timeframe, since, limit):
+        async_exchange = ccxt.async_support.binance()
+        try:
+            return await async_exchange.fetch_ohlcv(symbol, timeframe, since, limit)
+        finally:
+            await async_exchange.close()
+
+    while True:
+        try:
+            ohlcv = await fetch_ohlcv_async(symbol, timeframe, since, limit)
+            if not ohlcv:
+                break
+            all_ohlcv.extend(ohlcv)
+            since = ohlcv[-1][0] + 1
+        except Exception as e:
+            logger.error(f"Error fetching historical data for {symbol}: {e}")
+            return None
+    
+    if not all_ohlcv: return None
+
+    df = pd.DataFrame(all_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+    df.set_index('timestamp', inplace=True)
+    df.to_csv(cache_file)
+    logger.info(f"Saved data for {symbol} to {cache_file}")
+    return df
+
+async def backtest_runner_job(context: ContextTypes.DEFAULT_TYPE):
+    """Job function to run a single backtest in the background."""
+    job_data = context.job.data
+    chat_id = job_data['chat_id']
+    symbol = job_data['symbol']
+    strategy_name = job_data['strategy_name']
+    days = job_data['days']
+
+    await context.bot.send_message(chat_id, f"🔍 جاري تحميل البيانات التاريخية لـ `{symbol}`...", parse_mode=ParseMode.MARKDOWN)
+    df = await fetch_and_cache_data(symbol, TIMEFRAME, days)
+    if df is None or df.empty:
+        await context.bot.send_message(chat_id, f"❌ فشل تحميل البيانات التاريخية لـ `{symbol}`. الرجاء المحاولة مرة أخرى.", parse_mode=ParseMode.MARKDOWN)
+        return
+
+    await context.bot.send_message(chat_id, f"⚙️ بدء محاكاة التداول على بيانات {days} يوم...")
+
+    test_settings = bot_data['settings'].copy()
+    if 'params' in job_data:
+        test_settings[strategy_name].update(job_data['params'])
+
+    scanner_func = SCANNERS.get(strategy_name)
+    if not scanner_func:
+        await context.bot.send_message(chat_id, f"❌ استراتيجية غير معروفة: {strategy_name}")
+        return
+
+    balance = 1000.0
+    trades = []
+    in_trade = False
+    entry_price = 0
+    portfolio_history = [balance]
+
+    # Pre-calculate all necessary indicators
+    df.ta.bbands(length=20, append=True)
+    df.ta.kc(length=20, append=True)
+    df.ta.supertrend(length=10, multiplier=3, append=True)
+    df.ta.ema(length=200, append=True)
+    df.ta.adx(append=True)
+    df.ta.rsi(length=14, append=True)
+    df.ta.macd(append=True)
+    df.ta.vwap(append=True)
+
+    for i in range(200, len(df)): # Start after indicators have warmed up
+        row = df.iloc[i]
+        
+        if not in_trade:
+            signal = scanner_func(df.iloc[:i+1], test_settings.get(strategy_name, {}), 1.5, 25) 
+            if signal:
+                in_trade = True
+                entry_price = row['close']
+        else:
+            sl_percent = test_settings['stop_loss_percentage']
+            tp_percent = test_settings['take_profit_percentage']
+            stop_loss = entry_price * (1 - sl_percent / 100)
+            take_profit = entry_price * (1 + tp_percent / 100)
+
+            if row['low'] <= stop_loss:
+                pnl = (stop_loss - entry_price) / entry_price
+                balance *= (1 + pnl)
+                trades.append(pnl)
+                in_trade = False
+                portfolio_history.append(balance)
+            elif row['high'] >= take_profit:
+                pnl = (take_profit - entry_price) / entry_price
+                balance *= (1 + pnl)
+                trades.append(pnl)
+                in_trade = False
+                portfolio_history.append(balance)
+
+    total_trades = len(trades)
+    if total_trades == 0:
+        await context.bot.send_message(chat_id, f"ℹ️ لم يتم العثور على أي صفقات لـ `{symbol}` باستراتيجية `{strategy_name}` خلال الفترة المحددة.", parse_mode=ParseMode.MARKDOWN)
+        return
+
+    wins = [t for t in trades if t > 0]
+    losses = [t for t in trades if t < 0]
+    win_rate = (len(wins) / total_trades * 100) if total_trades > 0 else 0
+    total_pnl_percent = (balance / 1000.0 - 1) * 100
+
+    gross_profit = sum(wins)
+    gross_loss = abs(sum(losses))
+    profit_factor = gross_profit / gross_loss if gross_loss > 0 else float('inf')
+
+    peak = portfolio_history[0]
+    max_dd = 0
+    for value in portfolio_history:
+        if value > peak: peak = value
+        dd = (peak - value) / peak
+        if dd > max_dd: max_dd = dd
+    
+    params_str = ""
+    if 'params' in job_data:
+        params_str = "\n".join([f"  - `{k}`: `{v}`" for k, v in job_data['params'].items()])
+        params_str = f"\n*الإعدادات المستخدمة:*\n{params_str}"
+
+    report = (f"**🧪 نتائج الاختبار المسبق (Backtest)**\n\n"
+              f"- **العملة:** `{symbol}`\n"
+              f"- **الاستراتيجية:** `{STRATEGY_NAMES_AR.get(strategy_name, strategy_name)}`\n"
+              f"- **الفترة:** آخر {days} يوم\n"
+              f"{params_str}\n"
+              f"--- **النتائج** ---\n"
+              f"💰 **إجمالي الربح/الخسارة:** `{total_pnl_percent:+.2f}%`\n"
+              f"📈 **إجمالي الصفقات:** `{total_trades}`\n"
+              f"✅ **معدل النجاح:** `{win_rate:.2f}%`\n"
+              f"⚖️ **معامل الربح:** `{profit_factor:.2f}`\n"
+              f"📉 **أقصى تراجع:** `-{max_dd*100:.2f}%`")
+    
+    await context.bot.send_message(chat_id, report, parse_mode=ParseMode.MARKDOWN)
+
+async def optimization_runner_job(context: ContextTypes.DEFAULT_TYPE):
+    """Job function to run optimization in the background."""
+    await asyncio.sleep(10) # Simulate a long process
+    await context.bot.send_message(context.job.data['chat_id'], "🤖 **اكتملت عملية التحسين!**\n\n(هذه ميزة تجريبية، سيتم عرض النتائج هنا في التحديثات المستقبلية.)")
+
+# --- [إصلاح] تعريف الوظيفة المفقودة ---
+async def lab_conversation_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles user text input during the lab setup conversation."""
+    user_data = context.user_data
+    if 'lab_state' not in user_data:
+        return
+
+    state = user_data['lab_state']
+    text = update.message.text.upper()
+
+    if state == 'awaiting_symbol':
+        if '/' not in text or len(text.split('/')[0]) < 2:
+            await update.message.reply_text("❌ رمز غير صالح. الرجاء إرسال الرمز بالتنسيق الصحيح (مثال: `BTC/USDT`).", parse_mode=ParseMode.MARKDOWN)
+            return
+        
+        user_data['lab_symbol'] = text
+        user_data['lab_state'] = 'awaiting_strategy'
+        
+        keyboard = [[InlineKeyboardButton(STRATEGY_NAMES_AR.get(name, name), callback_data=f"lab_strategy_{name}")] for name in SCANNERS.keys()]
+        await update.message.reply_text("اختر الاستراتيجية للاختبار:", reply_markup=InlineKeyboardMarkup(keyboard))
+    
+    elif text.startswith('/'):
+        for key in ['lab_mode', 'lab_state', 'lab_symbol', 'lab_strategy']:
+            user_data.pop(key, None)
+        logger.info("Exited strategy lab conversation due to new command.")
+
+
+# --- Reports and Telegram Commands (Modified) ---
 def generate_performance_report_string():
     REPORT_DAYS = 30
     if not os.path.exists(DB_FILE): return "❌ خطأ: لم يتم العثور على ملف قاعدة البيانات."
@@ -917,7 +1067,6 @@ def generate_performance_report_string():
             report_lines.extend([f"--- **{reason_ar}** ---", f"- **إجمالي التوصيات:** {total_trades}", f"- **نسبة النجاح:** {success_rate:.1f}%", f"- **متوسط أقصى ربح:** {avg_max_profit:.2f}%", ""])
     return "\n".join(report_lines)
 
-# [تحديث واجهة المستخدم] تحديث القوائم الرئيسية
 main_menu_keyboard = [["Dashboard 🖥️"], ["⚙️ الإعدادات"], ["ℹ️ مساعدة"]]
 settings_menu_keyboard = [["🏁 أنماط جاهزة", "🎭 تفعيل/تعطيل الماسحات"], ["🔧 تعديل المعايير", "🔙 القائمة الرئيسية"]]
 
@@ -1033,24 +1182,18 @@ async def send_daily_report(context: ContextTypes.DEFAULT_TYPE):
             current_balance = bot_data['settings']['virtual_portfolio_balance_usdt']
             start_of_day_balance = current_balance - total_pnl
 
-            # تحليل أبرز الصفقات
-            best_trade = max(closed_today, key=lambda t: t.get('pnl_usdt', -float('inf')))
-            worst_trade = min(closed_today, key=lambda t: t.get('pnl_usdt', float('inf')))
+            best_trade = max(closed_today, key=lambda t: t.get('pnl_usdt', -float('inf')), default=None)
+            worst_trade = min(closed_today, key=lambda t: t.get('pnl_usdt', float('inf')), default=None)
 
-            # تحليل الاستراتيجيات
             strategy_counter = Counter()
-            strategy_wins = defaultdict(int)
             for trade in closed_today:
                 reasons = trade['reason'].split(' + ')
                 for reason in reasons:
                     strategy_counter[reason] += 1
-                    if trade['status'] == 'ناجحة':
-                        strategy_wins[reason] += 1
             
             most_active_strategy_en = strategy_counter.most_common(1)[0][0] if strategy_counter else "N/A"
             most_active_strategy_ar = STRATEGY_NAMES_AR.get(most_active_strategy_en, most_active_strategy_en)
 
-            # بناء الرسالة
             parts = [f"**🗓️ التقرير اليومي المفصل | {today_str}**\n"]
             
             parts.append("💰 **الأداء المالي:**")
@@ -1397,4 +1540,3 @@ if __name__ == '__main__':
         main()
     except Exception as e:
         logging.critical(f"Bot stopped due to a critical unhandled error: {e}", exc_info=True)
-
