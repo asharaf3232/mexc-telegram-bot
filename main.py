@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
 
 # --- المكتبات المطلوبة --- #
-import ccxt.async_support as ccxt
+# [إصلاح جذري] تم تصحيح استيراد المكتبة لمنع الأخطاء المتكررة
+import ccxt.async_support as ccxt_async
+import ccxt
 import pandas as pd
 import pandas_ta as ta
 import asyncio
@@ -15,7 +17,7 @@ from datetime import datetime, time as dt_time, timedelta, timezone
 from zoneinfo import ZoneInfo
 from collections import deque, Counter, defaultdict
 from pathlib import Path
-import itertools # [جديد] لتوليد توليفات التحسين
+import itertools
 
 # [UPGRADE] المكتبات الجديدة لتحليل الأخبار
 import feedparser
@@ -63,10 +65,9 @@ SCAN_INTERVAL_SECONDS = 900
 TRACK_INTERVAL_SECONDS = 120
 
 APP_ROOT = '.'
-# [تحديث] تم تحديث الإصدار إلى v8
-DB_FILE = os.path.join(APP_ROOT, 'trading_bot_v8.db')
-SETTINGS_FILE = os.path.join(APP_ROOT, 'settings_v8.json')
-# [جديد] مجلد لتخزين البيانات التاريخية مؤقتاً
+# [تحديث] تم تحديث الإصدار إلى v9
+DB_FILE = os.path.join(APP_ROOT, 'trading_bot_v9.db')
+SETTINGS_FILE = os.path.join(APP_ROOT, 'settings_v9.json')
 DATA_CACHE_DIR = Path(APP_ROOT) / 'data_cache'
 DATA_CACHE_DIR.mkdir(exist_ok=True)
 
@@ -74,7 +75,7 @@ DATA_CACHE_DIR.mkdir(exist_ok=True)
 EGYPT_TZ = ZoneInfo("Africa/Cairo")
 
 # --- إعداد مسجل الأحداث (Logger) --- #
-LOG_FILE = os.path.join(APP_ROOT, 'bot_v8.log')
+LOG_FILE = os.path.join(APP_ROOT, 'bot_v9.log')
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO, handlers=[logging.FileHandler(LOG_FILE, 'a'), logging.StreamHandler()])
 logging.getLogger('httpx').setLevel(logging.WARNING)
 logging.getLogger('apscheduler').setLevel(logging.WARNING)
@@ -110,7 +111,6 @@ PRESET_VERY_LAX = {
 }
 PRESETS = {"PRO": PRESET_PRO, "LAX": PRESET_LAX, "STRICT": PRESET_STRICT, "VERY_LAX": PRESET_VERY_LAX}
 
-# [تحديث واجهة المستخدم] ترجمة أسماء الاستراتيجيات
 STRATEGY_NAMES_AR = {
     "Momentum Breakout": "زخم اختراقي",
     "Squeeze Breakout": "اختراق انضغاطي",
@@ -118,7 +118,6 @@ STRATEGY_NAMES_AR = {
     "Supertrend Flip": "انعكاس سوبرترند"
 }
 
-# [جديد] تحديد المعايير القابلة للتحسين لكل استراتيجية
 OPTIMIZABLE_PARAMS_GRID = {
     "supertrend_pullback": {
         "atr_period": [7, 10, 14],
@@ -416,7 +415,8 @@ SCANNERS = {
 # --- Core Bot Functions ---
 async def initialize_exchanges():
     async def connect(ex_id):
-        exchange = getattr(ccxt, ex_id)({'enableRateLimit': True, 'options': {'defaultType': 'spot'}})
+        # [إصلاح] استخدام ccxt_async بشكل صحيح
+        exchange = getattr(ccxt_async, ex_id)({'enableRateLimit': True, 'options': {'defaultType': 'spot'}})
         try:
             await exchange.load_markets()
             bot_data["exchanges"][ex_id] = exchange
@@ -866,7 +866,7 @@ async def fetch_and_cache_data(symbol, timeframe, days):
         return pd.read_csv(cache_file, index_col='timestamp', parse_dates=True)
 
     logger.info(f"Fetching new historical data for {symbol} for the last {days} days...")
-    exchange = ccxt.async_support.binance()
+    exchange = ccxt_async.binance()
     since = exchange.milliseconds() - timedelta(days=days).total_seconds() * 1000
     limit = 1000 
     all_ohlcv = []
@@ -1055,7 +1055,7 @@ def generate_performance_report_string():
 main_menu_keyboard = [["Dashboard 🖥️"], ["⚙️ الإعدادات"], ["ℹ️ مساعدة"]]
 settings_menu_keyboard = [["🏁 أنماط جاهزة", "🎭 تفعيل/تعطيل الماسحات"], ["🔧 تعديل المعايير", "🔙 القائمة الرئيسية"]]
 
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("أهلاً بك في بوت المحلل الآلي! (v8 - إصدار مستقر)", reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True))
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("أهلاً بك في بوت المحلل الآلي! (v9 - إصدار المسؤولية)", reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True))
 
 async def show_dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target_message = update.message or update.callback_query.message
@@ -1463,7 +1463,7 @@ async def universal_text_handler(update: Update, context: ContextTypes.DEFAULT_T
     if text in menu_handlers:
         # الخروج من أي حوار نشط عند الضغط على زر قائمة
         for key in list(user_data.keys()):
-            if key.startswith('lab_'):
+            if key.startswith('lab_') or key == 'awaiting_input_for_param':
                 user_data.pop(key)
         
         handler = menu_handlers[text]
@@ -1514,12 +1514,12 @@ async def post_init(application: Application):
     job_queue.run_repeating(track_open_trades, interval=TRACK_INTERVAL_SECONDS, first=20, name='track_open_trades')
     job_queue.run_daily(send_daily_report, time=dt_time(hour=23, minute=55, tzinfo=EGYPT_TZ), name='daily_report')
     logger.info(f"Jobs scheduled. Daily report at 23:55 {EGYPT_TZ}.")
-    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *المحلل الآلي جاهز للعمل! (v8 - إصدار مستقر)*", parse_mode=ParseMode.MARKDOWN)
+    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *المحلل الآلي جاهز للعمل! (v9 - إصدار المسؤولية)*", parse_mode=ParseMode.MARKDOWN)
     logger.info("Post-init finished.")
 async def post_shutdown(application: Application): await asyncio.gather(*[ex.close() for ex in bot_data["exchanges"].values()]); logger.info("All exchange connections closed.")
 
 def main():
-    print("🚀 Starting Pro Trading Analyzer Bot v8 (Stable & Fixed)...")
+    print("🚀 Starting Pro Trading Analyzer Bot v9 (Stable & Fixed)...")
     load_settings(); init_database()
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).post_shutdown(post_shutdown).build()
 
