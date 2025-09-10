@@ -581,6 +581,43 @@ async def initialize_exchanges():
 
     await asyncio.gather(*[connect(ex_id) for ex_id in EXCHANGES_TO_SCAN])
 
+async def reinitialize_binance():
+    """Closes the existing Binance connection and re-initializes it based on the current settings."""
+    logger.info("Re-initializing Binance connection due to trading mode change...")
+    
+    # Close existing connection if it exists
+    if 'binance' in bot_data['exchanges']:
+        try:
+            await bot_data['exchanges']['binance'].close()
+            logger.info("Existing Binance connection closed.")
+        except Exception as e:
+            logger.error(f"Error closing existing Binance connection: {e}")
+        del bot_data['exchanges']['binance']
+
+    # Re-connect with current settings
+    settings = bot_data['settings']
+    real_trading_enabled = settings.get("REAL_TRADING_ENABLED", False)
+    
+    exchange_config = {'enableRateLimit': True, 'options': {'defaultType': 'spot'}}
+    if real_trading_enabled:
+        if BINANCE_API_KEY != 'YOUR_BINANCE_API_KEY' and BINANCE_API_SECRET != 'YOUR_BINANCE_SECRET_KEY':
+            exchange_config['apiKey'] = BINANCE_API_KEY
+            exchange_config['secret'] = BINANCE_API_SECRET
+            logger.info("Binance Real Trading mode: API keys will be loaded for re-connection.")
+        else:
+            logger.error("Binance Real Trading is ENABLED but API keys are not set. Cannot execute real trades.")
+    
+    binance_exchange = ccxt.binance(exchange_config)
+    try:
+        await binance_exchange.load_markets()
+        bot_data["exchanges"]['binance'] = binance_exchange
+        logger.info("Binance connection re-initialized successfully.")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to re-connect to Binance: {e}")
+        await binance_exchange.close()
+        return False
+
 async def aggregate_top_movers():
     all_tickers = []
     async def fetch(ex_id, ex):
@@ -1512,21 +1549,43 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         current_value = bot_data["settings"].get(param_key)
         if isinstance(current_value, bool):
             new_value = not current_value
-            # [تداول حقيقي] تحذير هام عند تفعيل التداول الحقيقي
-            if param_key == "REAL_TRADING_ENABLED" and new_value is True:
-                if BINANCE_API_KEY == 'YOUR_BINANCE_API_KEY' or BINANCE_API_SECRET == 'YOUR_BINANCE_SECRET_KEY':
-                    await query.answer("⚠️ لا يمكن التفعيل! مفاتيح Binance API غير مهيأة.", show_alert=True)
-                    return
-                await query.answer("‼️ تحذير! أنت على وشك تفعيل التداول بأموال حقيقية.", show_alert=True)
+
+            if param_key == "REAL_TRADING_ENABLED":
+                if new_value is True: # If trying to enable
+                    if BINANCE_API_KEY == 'YOUR_BINANCE_API_KEY' or BINANCE_API_SECRET == 'YOUR_BINANCE_SECRET_KEY':
+                        await query.answer("⚠️ لا يمكن التفعيل! مفاتيح Binance API غير مهيأة.", show_alert=True)
+                        return
+                    await query.answer("‼️ تحذير! أنت على وشك تفعيل التداول بأموال حقيقية.", show_alert=True)
                 
-            bot_data["settings"][param_key] = new_value
-            # [تداول حقيقي] تحديث حالة البوت
-            bot_data['status_snapshot']['trading_mode'] = "حقيقي 🟢" if new_value else "وهمي 📝"
+                # Save the new setting temporarily
+                bot_data["settings"][param_key] = new_value
+                save_settings()
+
+                # Attempt to re-initialize Binance with the new setting
+                reinit_success = await reinitialize_binance()
+
+                if reinit_success:
+                    bot_data['status_snapshot']['trading_mode'] = "حقيقي 🟢" if new_value else "وهمي 📝"
+                    logger.info(f"Trading mode toggled. New mode: {bot_data['status_snapshot']['trading_mode']}")
+                    await query.answer(f"✅ تم تبديل وضع التداول إلى: {bot_data['status_snapshot']['trading_mode']}")
+                else:
+                    # If re-initialization fails, revert the setting
+                    logger.error("Re-initialization failed. Reverting REAL_TRADING_ENABLED setting.")
+                    bot_data["settings"][param_key] = not new_value # Revert to old value
+                    bot_data['status_snapshot']['trading_mode'] = "وهمي 📝"
+                    # Also need to re-initialize back to the non-API key state
+                    await reinitialize_binance() 
+                    await query.message.reply_text("❌ فشل الاتصال بـ Binance بالمفاتيح الجديدة. تم الإبقاء على الوضع الوهمي.")
+                
+            else: # For other boolean toggles
+                bot_data["settings"][param_key] = new_value
+                await query.answer(f"✅ تم تبديل '{PARAM_DISPLAY_NAMES.get(param_key, param_key)}'")
+
             bot_data["settings"]["active_preset_name"] = "Custom"
-            save_settings()
-            await query.answer(f"✅ تم تبديل '{PARAM_DISPLAY_NAMES.get(param_key, param_key)}'")
+            save_settings() # Save the final state
             await show_parameters_menu(update, context)
-        else:
+
+        else: # For non-boolean parameters
             await query.edit_message_text(f"📝 *تعديل '{PARAM_DISPLAY_NAMES.get(param_key, param_key)}'*\n\n*القيمة الحالية:* `{current_value}`\n\nالرجاء إرسال القيمة الجديدة.", parse_mode=ParseMode.MARKDOWN)
     elif data.startswith("toggle_"):
         scanner_name = data.split("_", 1)[1]
