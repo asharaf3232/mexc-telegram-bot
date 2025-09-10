@@ -14,6 +14,8 @@ import sqlite3
 from datetime import datetime, time as dt_time, timedelta, timezone
 from zoneinfo import ZoneInfo
 from collections import deque, Counter, defaultdict
+from pathlib import Path
+import itertools # [جديد] لتوليد توليفات التحسين
 
 # [UPGRADE] المكتبات الجديدة لتحليل الأخبار
 import feedparser
@@ -61,15 +63,18 @@ SCAN_INTERVAL_SECONDS = 900
 TRACK_INTERVAL_SECONDS = 120
 
 APP_ROOT = '.'
-# [تحديث] تم تحديث الإصدار إلى v5
-DB_FILE = os.path.join(APP_ROOT, 'trading_bot_v5.db')
-SETTINGS_FILE = os.path.join(APP_ROOT, 'settings_v5.json')
+# [تحديث] تم تحديث الإصدار إلى v6
+DB_FILE = os.path.join(APP_ROOT, 'trading_bot_v6.db')
+SETTINGS_FILE = os.path.join(APP_ROOT, 'settings_v6.json')
+# [جديد] مجلد لتخزين البيانات التاريخية مؤقتاً
+DATA_CACHE_DIR = Path(APP_ROOT) / 'data_cache'
+DATA_CACHE_DIR.mkdir(exist_ok=True)
 
 
 EGYPT_TZ = ZoneInfo("Africa/Cairo")
 
 # --- إعداد مسجل الأحداث (Logger) --- #
-LOG_FILE = os.path.join(APP_ROOT, 'bot_v5.log')
+LOG_FILE = os.path.join(APP_ROOT, 'bot_v6.log')
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO, handlers=[logging.FileHandler(LOG_FILE, 'a'), logging.StreamHandler()])
 logging.getLogger('httpx').setLevel(logging.WARNING)
 logging.getLogger('apscheduler').setLevel(logging.WARNING)
@@ -112,6 +117,20 @@ STRATEGY_NAMES_AR = {
     "RSI Divergence": "دايفرجنس RSI",
     "Supertrend Flip": "انعكاس سوبرترند"
 }
+
+# [جديد] تحديد المعايير القابلة للتحسين لكل استراتيجية
+OPTIMIZABLE_PARAMS_GRID = {
+    "supertrend_pullback": {
+        "atr_period": [7, 10, 14],
+        "atr_multiplier": [2.0, 3.0, 4.0]
+    },
+    "breakout_squeeze_pro": {
+        "bbands_period": [20, 25],
+        "keltner_period": [20, 25],
+        "keltner_atr_multiplier": [1.5, 2.0]
+    }
+}
+
 
 # --- Constants for Interactive Settings menu ---
 EDITABLE_PARAMS = {
@@ -160,7 +179,6 @@ bot_data = {
         "markets_found": 0, "signals_found": 0, "active_trades_count": 0,
         "scan_in_progress": False, "btc_market_mood": "غير محدد"
     },
-    # [ميزة جديدة] سجل الفحص للاقتراحات الذكية
     "scan_history": deque(maxlen=10)
 }
 scan_lock = asyncio.Lock()
@@ -870,13 +888,14 @@ def generate_performance_report_string():
 main_menu_keyboard = [["Dashboard 🖥️"], ["⚙️ الإعدادات"], ["ℹ️ مساعدة"]]
 settings_menu_keyboard = [["🏁 أنماط جاهزة", "🎭 تفعيل/تعطيل الماسحات"], ["🔧 تعديل المعايير", "🔙 القائمة الرئيسية"]]
 
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("أهلاً بك في بوت المحلل الآلي! (v5 - النهائي)", reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True))
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("أهلاً بك في بوت المحلل الآلي! (v6 - مختبر الاستراتيجيات)", reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True))
 
 async def show_dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target_message = update.message or update.callback_query.message
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("📊 الإحصائيات العامة", callback_data="dashboard_stats"), InlineKeyboardButton("📈 الصفقات النشطة", callback_data="dashboard_active_trades")],
         [InlineKeyboardButton("📜 تقرير أداء الاستراتيجيات", callback_data="dashboard_strategy_report")],
+        [InlineKeyboardButton("🔬 مختبر الاستراتيجيات", callback_data="dashboard_lab")], # [جديد]
         [InlineKeyboardButton("🗓️ التقرير اليومي", callback_data="dashboard_daily_report"), InlineKeyboardButton("🕵️‍♂️ تقرير التشخيص", callback_data="dashboard_debug")],
         [InlineKeyboardButton("🔄 تحديث", callback_data="dashboard_refresh")]
     ])
@@ -1156,7 +1175,9 @@ async def show_active_trades_command(update: Update, context: ContextTypes.DEFAU
 
 async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query; await query.answer(); data = query.data
+    user_data = context.user_data
     
+    # --- Dashboard Routing ---
     if data.startswith("dashboard_"):
         action = data.split("_", 1)[1]
         if action == "stats": await stats_command(update, context)
@@ -1165,6 +1186,44 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         elif action == "daily_report": await daily_report_command(update, context)
         elif action == "debug": await debug_command(update, context)
         elif action == "refresh": await show_dashboard_command(update, context)
+        elif action == "lab": # [جديد]
+            keyboard = [[InlineKeyboardButton("🧪 إجراء اختبار مسبق (Backtest)", callback_data="lab_start_backtest")],
+                        [InlineKeyboardButton("🤖 البحث عن أفضل الإعدادات (Optimize)", callback_data="lab_start_optimize")]]
+            await query.edit_message_text("🔬 **مختبر الاستراتيجيات**\n\nاختر الأداة التي تريد استخدامها:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
+        return
+
+    # --- Strategy Lab Flow ---
+    elif data.startswith("lab_"):
+        action = data.split("_", 1)[1]
+        if action == "start_backtest":
+            user_data['lab_mode'] = 'backtest'
+            user_data['lab_state'] = 'awaiting_symbol'
+            await query.edit_message_text("✍️ **بدء اختبار مسبق**\n\nالرجاء إرسال رمز العملة التي تريد اختبارها (مثال: `BTC/USDT`).", parse_mode=ParseMode.MARKDOWN)
+        elif action == "start_optimize":
+            await query.edit_message_text("🤖 **قيد التطوير**\n\nميزة البحث عن أفضل الإعدادات ستكون متاحة قريباً!", parse_mode=ParseMode.MARKDOWN)
+        elif action.startswith("strategy"):
+            if user_data.get('lab_state') == 'awaiting_strategy':
+                strategy_name = data.split("_", 2)[2]
+                user_data['lab_strategy'] = strategy_name
+                user_data['lab_state'] = 'awaiting_period'
+                keyboard = [[InlineKeyboardButton("آخر شهر", callback_data="lab_period_30"),
+                             InlineKeyboardButton("آخر 3 أشهر", callback_data="lab_period_90")],
+                            [InlineKeyboardButton("آخر 6 أشهر", callback_data="lab_period_180")]]
+                await query.edit_message_text("🗓️ اختر الفترة الزمنية للاختبار:", reply_markup=InlineKeyboardMarkup(keyboard))
+        elif action.startswith("period"):
+            if user_data.get('lab_state') == 'awaiting_period':
+                days = int(data.split("_")[2])
+                await query.edit_message_text(f"⏳ **جاري جدولة الاختبار...**\n\nسيتم إجراء الاختبار في الخلفية. سأقوم بإعلامك بالنتائج فور جهوزها.", parse_mode=ParseMode.MARKDOWN)
+                
+                context.job_queue.run_once(backtest_runner_job, 1, data={
+                    'chat_id': query.message.chat_id,
+                    'symbol': user_data['lab_symbol'],
+                    'strategy_name': user_data['lab_strategy'],
+                    'days': days
+                }, name=f"backtest_{query.message.chat_id}_{time.time()}")
+                
+                for key in ['lab_mode', 'lab_state', 'lab_symbol', 'lab_strategy']:
+                    user_data.pop(key, None)
         return
 
     elif data.startswith("preset_"):
@@ -1226,6 +1285,9 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
 
 
 async def main_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if 'lab_state' in context.user_data:
+        return # Handled by lab_conversation_handler, do nothing here
+
     if param := context.user_data.pop('awaiting_input_for_param', None):
         value_str = update.message.text
         settings_menu_id = context.user_data.pop('settings_menu_id', None)
@@ -1275,19 +1337,23 @@ async def post_init(application: Application):
     job_queue.run_repeating(track_open_trades, interval=TRACK_INTERVAL_SECONDS, first=20, name='track_open_trades')
     job_queue.run_daily(send_daily_report, time=dt_time(hour=23, minute=55, tzinfo=EGYPT_TZ), name='daily_report')
     logger.info(f"Jobs scheduled. Daily report at 23:55 {EGYPT_TZ}.")
-    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *المحلل الآلي جاهز للعمل! (v5 - النهائي)*", parse_mode=ParseMode.MARKDOWN)
+    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *المحلل الآلي جاهز للعمل! (v6 - مختبر الاستراتيجيات)*", parse_mode=ParseMode.MARKDOWN)
     logger.info("Post-init finished.")
 async def post_shutdown(application: Application): await asyncio.gather(*[ex.close() for ex in bot_data["exchanges"].values()]); logger.info("All exchange connections closed.")
 
 def main():
-    print("🚀 Starting Pro Trading Analyzer Bot v5 (Final)...")
+    print("🚀 Starting Pro Trading Analyzer Bot v6 (Strategy Lab)...")
     load_settings(); init_database()
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).post_shutdown(post_shutdown).build()
 
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("check", check_trade_command))
     application.add_handler(CallbackQueryHandler(button_callback_handler))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, main_text_handler))
+    
+    # [تعديل] إضافة معالج المحادثة للمختبر
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, lab_conversation_handler), group=1)
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, main_text_handler), group=2)
+    
     application.add_error_handler(error_handler)
 
     print("✅ Bot is now running and polling for updates...")
