@@ -538,6 +538,7 @@ async def show_parameters_menu(update: Update, context: ContextTypes.DEFAULT_TYP
                     break
             
             if not valid_path or current_value is None:
+                # Log the error but continue to the next parameter
                 logger.error(f"Failed to retrieve value for '{param_key}'. Check settings file.")
                 continue
             
@@ -627,7 +628,7 @@ async def universal_text_handler(update: Update, context: ContextTypes.DEFAULT_T
     if text in route_map: await route_map[text](update, context)
     elif text in settings_route_map:
         # Create a dummy query to call the button handler
-        dummy_query = type('Query', (), {'message': update.message, 'data': settings_route_map[text], 'edit_message_text': update.message.reply_text, 'answer':(lambda: asyncio.sleep(0))})
+        dummy_query = type('Query', (), {'message': update.message, 'data': settings_route_map[text], 'edit_message_text': (lambda *args, **kwargs: asyncio.sleep(0)), 'answer':(lambda: asyncio.sleep(0))})
         await button_callback_handler(Update(update.update_id, callback_query=dummy_query), context)
         
 async def send_telegram_recommendation(bot, signal):
@@ -683,4 +684,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
