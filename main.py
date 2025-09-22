@@ -293,7 +293,7 @@ SCANNERS = { "momentum_breakout": analyze_momentum_breakout, "breakout_squeeze_p
 async def initialize_exchanges():
     async def connect(ex_id):
         try:
-            exchange = getattr(ccxt_async, ex_id)({'enableRateLimit': True}); await exchange.load_markets(); brain_state.exchanges[ex_id] = exchange; logger.info(f"Connected to {ex_id}.")
+            exchange = getattr(ccxt.async_support, ex_id)({'enableRateLimit': True}); await exchange.load_markets(); brain_state.exchanges[ex_id] = exchange; logger.info(f"Connected to {ex_id}.")
         except Exception as e: logger.error(f"Failed to connect to {ex_id}: {e}")
     await asyncio.gather(*[connect(ex_id) for ex_id in EXCHANGES_TO_SCAN])
 
