@@ -538,7 +538,6 @@ async def show_parameters_menu(update: Update, context: ContextTypes.DEFAULT_TYP
                     break
             
             if not valid_path or current_value is None:
-                # Log the error but continue to the next parameter
                 logger.error(f"Failed to retrieve value for '{param_key}'. Check settings file.")
                 continue
             
@@ -594,11 +593,13 @@ async def handle_setting_value(update: Update, context: ContextTypes.DEFAULT_TYP
         
 async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query; await query.answer(); data = query.data
-    
-    if data == "settings_modes": await show_execution_modes_menu(update, context)
-    elif data == "settings_adaptive": await show_adaptive_intelligence_menu(update, context)
-    elif data == "settings_scanners": await show_scanners_menu(update, context)
-    elif data == "settings_params": await show_parameters_menu(update, context)
+    route_map = {
+        "settings_modes": show_execution_modes_menu,
+        "settings_adaptive": show_adaptive_intelligence_menu,
+        "settings_scanners": show_scanners_menu,
+        "settings_params": show_parameters_menu,
+    }
+    if data in route_map: await route_map[data](update, context)
     elif data == "settings_main":
         try: await query.message.delete()
         except: pass
@@ -615,21 +616,18 @@ async def universal_text_handler(update: Update, context: ContextTypes.DEFAULT_T
         return
         
     text = update.message.text
-    if text == "Dashboard 🖥️": await show_dashboard_command(update, context)
-    elif text == "⚙️ الإعدادات": await show_settings_menu(update, context)
-    elif text == "🔙 القائمة الرئيسية": await start_command(update, context)
-    elif text == "🤖 أوضاع التنفيذ":
+    route_map = {
+        "Dashboard 🖥️": show_dashboard_command, "⚙️ الإعدادات": show_settings_menu,
+        "🔙 القائمة الرئيسية": start_command,
+    }
+    settings_route_map = {
+        "🤖 أوضاع التنفيذ": "settings_modes", "🧠 الذكاء التكيفي": "settings_adaptive",
+        "🔭 تفعيل/تعطيل الماسحات": "settings_scanners", "🔧 تعديل المعايير": "settings_params",
+    }
+    if text in route_map: await route_map[text](update, context)
+    elif text in settings_route_map:
         # Create a dummy query to call the button handler
-        dummy_query = type('Query', (), {'message': update.message, 'data': "settings_modes", 'edit_message_text': (lambda *args, **kwargs: asyncio.sleep(0)), 'answer':(lambda: asyncio.sleep(0))})
-        await button_callback_handler(Update(update.update_id, callback_query=dummy_query), context)
-    elif text == "🧠 الذكاء التكيفي":
-        dummy_query = type('Query', (), {'message': update.message, 'data': "settings_adaptive", 'edit_message_text': (lambda *args, **kwargs: asyncio.sleep(0)), 'answer':(lambda: asyncio.sleep(0))})
-        await button_callback_handler(Update(update.update_id, callback_query=dummy_query), context)
-    elif text == "🔭 تفعيل/تعطيل الماسحات":
-        dummy_query = type('Query', (), {'message': update.message, 'data': "settings_scanners", 'edit_message_text': (lambda *args, **kwargs: asyncio.sleep(0)), 'answer':(lambda: asyncio.sleep(0))})
-        await button_callback_handler(Update(update.update_id, callback_query=dummy_query), context)
-    elif text == "🔧 تعديل المعايير":
-        dummy_query = type('Query', (), {'message': update.message, 'data': "settings_params", 'edit_message_text': (lambda *args, **kwargs: asyncio.sleep(0)), 'answer':(lambda: asyncio.sleep(0))})
+        dummy_query = type('Query', (), {'message': update.message, 'data': settings_route_map[text], 'edit_message_text': update.message.reply_text, 'answer':(lambda: asyncio.sleep(0))})
         await button_callback_handler(Update(update.update_id, callback_query=dummy_query), context)
         
 async def send_telegram_recommendation(bot, signal):
