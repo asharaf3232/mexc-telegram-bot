@@ -64,7 +64,7 @@ ALPHA_VANTAGE_API_KEY = os.getenv('ALPHA_VANTAGE_API_KEY', 'YOUR_AV_KEY_HERE')
 # --- إعدادات البوت ---
 EXCHANGES_TO_SCAN = ['binance', 'okx', 'bybit', 'kucoin', 'gate', 'mexc']
 TIMEFRAME = '15m'
-HIGHER_TIMEFRAME = '1h'
+HIGHER_TIMEFRAME = '4h'
 SCAN_INTERVAL_SECONDS = 900
 STRATEGY_ANALYSIS_INTERVAL_SECONDS = 7200
 
@@ -267,7 +267,7 @@ def analyze_arbitrage_opportunity(symbol, prices_data):
     if highest_bid > lowest_ask and buy_exchange != sell_exchange:
         gross_profit_percent = ((highest_bid / lowest_ask) - 1) * 100; net_profit_percent = gross_profit_percent - estimated_fees
         if net_profit_percent >= min_profit_percent:
-            return { "reason": "arbitrage_hunter", "buy_exchange": buy_exchange, "sell_exchange": sell_exchange, "buy_price": lowest_ask, "sell_price": highest_bid, "profit_percent": net_profit_percent }
+            return { "reason": "arbitrage_hunter", "symbol": symbol, "buy_exchange": buy_exchange, "sell_exchange": sell_exchange, "buy_price": lowest_ask, "sell_price": highest_bid, "profit_percent": net_profit_percent }
     return None
 
 SCANNERS = { "momentum_breakout": analyze_momentum_breakout, "breakout_squeeze_pro": analyze_breakout_squeeze_pro, "rsi_divergence": analyze_rsi_divergence, "supertrend_pullback": analyze_supertrend_pullback, "support_rebound": analyze_support_rebound, "sniper_pro": analyze_sniper_pro, "whale_radar": analyze_whale_radar }
@@ -313,7 +313,7 @@ async def get_market_mood():
             exchange = brain_state.exchanges.get('binance') or next(iter(brain_state.exchanges.values()))
             if not exchange: return {"mood": "DANGEROUS", "reason": "No exchanges connected for BTC trend."}
             htf_period = s['trend_filters']['htf_period']
-            ohlcv = await exchange.fetch_ohlcv('BTC/USDT', '4h', limit=htf_period + 5)
+            ohlcv = await exchange.fetch_ohlcv('BTC/USDT', HIGHER_TIMEFRAME, limit=htf_period + 5)
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['sma'] = ta.sma(df['close'], length=htf_period)
             is_btc_bullish = df['close'].iloc[-1] > df['sma'].iloc[-1]
@@ -340,7 +340,6 @@ async def worker(queue, signals_list, errors_list):
             exchange = exchanges.get(exchange_id)
             if not exchange: queue.task_done(); continue
             
-            # --- START FILTERS ---
             liq_filters, vol_filters, spread_filter, trend_filters = settings['liquidity_filters'], settings['volatility_filters'], settings['spread_filter'], settings['trend_filters']
             
             orderbook = await exchange.fetch_order_book(symbol, limit=1)
@@ -372,7 +371,6 @@ async def worker(queue, signals_list, errors_list):
             df.ta.adx(append=True); adx_col = find_col(df.columns, 'ADX_')
             adx_value = df[adx_col].iloc[-2] if adx_col and pd.notna(df[adx_col].iloc[-2]) else 0
             if trend_filters['enabled'] and adx_value < trend_filters['adx_level']: continue
-            # --- END FILTERS ---
 
             confirmed_reasons = []
             for name in settings['active_scanners']:
@@ -390,7 +388,6 @@ async def worker(queue, signals_list, errors_list):
                 risk_per_unit = current_atr * settings['atr_sl_multiplier']
                 stop_loss, take_profit = entry_price - risk_per_unit, entry_price + (risk_per_unit * settings['risk_reward_ratio'])
                 
-                # --- Adaptive Weight Calculation ---
                 trade_weight = 1.0; # Placeholder for full adaptive logic
                 
                 signals_list.append({"symbol": symbol, "exchange": exchange_id, "entry_price": entry_price, "take_profit": take_profit, "stop_loss": stop_loss, "reason": reason_str, "strength": strength, "weight": trade_weight})
@@ -478,7 +475,7 @@ async def handle_cycle_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query; await query.answer(); data = query.data
-    route_map = {"settings_modes": show_execution_modes_menu, "settings_main": show_settings_menu} # Simplified
+    route_map = {"settings_modes": show_execution_modes_menu, "settings_main": lambda u,c: u.callback_query.message.delete() and show_settings_menu(u,c)} # Simplified
     if data in route_map: await route_map[data](update, context)
     elif data.startswith("mode_cycle_"): await handle_cycle_mode(update, context)
     else: await query.message.reply_text(f"Button '{data}' not implemented yet.")
@@ -487,6 +484,7 @@ async def universal_text_handler(update: Update, context: ContextTypes.DEFAULT_T
     text = update.message.text
     route_map = {"Dashboard 🖥️": show_dashboard_command, "⚙️ الإعدادات": show_settings_menu, "🔙 القائمة الرئيسية": start_command}
     if text in route_map: await route_map[text](update, context)
+    elif text == "🤖 أوضاع التنفيذ": await update.message.reply_text("يرجى استخدام القائمة الداخلية.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("فتح قائمة أوضاع التنفيذ", callback_data="settings_modes")]]))
         
 # --- نقطة انطلاق العقل ---
 async def post_init(application: Application):
