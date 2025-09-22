@@ -527,8 +527,20 @@ async def show_parameters_menu(update: Update, context: ContextTypes.DEFAULT_TYP
         for param_key, display_name in params:
             keys = param_key.split('_')
             current_value = settings
+            
+            # --- الإصلاح هنا ---
+            valid_path = True
             for key in keys:
-                current_value = current_value.get(key)
+                if isinstance(current_value, dict):
+                    current_value = current_value.get(key)
+                else:
+                    valid_path = False
+                    break
+            
+            if not valid_path or current_value is None:
+                logger.error(f"Failed to retrieve value for '{param_key}'. Check settings file.")
+                continue
+            
             keyboard.append([InlineKeyboardButton(f"{display_name}: {current_value}", callback_data=f"param_set_{param_key}")])
     keyboard.append([InlineKeyboardButton("🔙 العودة للإعدادات", callback_data="settings_main")])
     await query.edit_message_text("🔧 **تعديل المعايير المتقدمة**\n\nاختر أي معيار لتعديل قيمته:", reply_markup=InlineKeyboardMarkup(keyboard))
@@ -671,3 +683,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
